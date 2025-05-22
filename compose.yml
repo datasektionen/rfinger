@@ -5,3 +5,37 @@ services:
       - initialBuckets=rfinger
     ports:
       - 9090:9090
+  nyckeln:
+    image: ghcr.io/datasektionen/nyckeln-under-dorrmattan
+    configs:
+      - source: nyckeln.yaml
+        target: /config.yaml
+    ports:
+      - 7001:7001
+      - 7002:7002
+      - 7003:7003
+
+configs:
+  nyckeln.yaml:
+    content: |
+      clients:
+        - id: "client-id"
+          secret: "client-secret"
+          redirect_uris:
+            - "http://localhost:8080/api/oidc/callback"
+
+      users:
+        - kth_id: turetek
+          email: turetek@kth.se
+          first_name: Ture
+          family_name: Teknolog
+          pls_permissions:
+            sso:
+              - fippel
+        - kth_id: viktoe
+          email: viktoe@kth.se
+          first_name: Viktor
+          family_name: Ekby
+          pls_permissions:
+            sso:
+              - fippel
