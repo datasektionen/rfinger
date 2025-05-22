@@ -1,0 +1,7 @@
+services:
+  s3mock:
+    image: adobe/s3mock:latest
+    environment:
+      - initialBuckets=rfinger
+    ports:
+      - 9090:9090
