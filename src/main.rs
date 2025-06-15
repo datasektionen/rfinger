@@ -1,17 +1,22 @@
 use actix_cors::Cors;
 use actix_files::NamedFile;
-use actix_multipart::form::{MultipartForm, json::Json as MpJson, tempfile::TempFile};
+use actix_multipart::form::{MultipartForm, tempfile::TempFile};
+use actix_web::http::header::{CacheControl, CacheDirective};
+use actix_web::web::Redirect;
 use actix_web::{App, get, middleware::Logger, web};
 use actix_web::{HttpResponse, HttpServer, post};
+use actix_web_httpauth::extractors::bearer::BearerAuth;
 use auth::auth_callback;
-use auth::types::{AuthMiddleware, OIDCClient, OIDCData};
+use auth::types::{AuthMiddleware, OIDCData};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
-use serde::Deserialize;
-use std::io::Read;
-use std::path;
+use image::imageops::FilterType;
+use image::{ImageFormat, ImageReader};
+use openidconnect::http::response;
+use std::io::{Cursor, Read};
+use webp::{Encoder, WebPMemory};
 
 mod auth;
 mod error;
@@ -68,7 +73,7 @@ async fn change_image(
     s3: web::Data<Client>,
     id: web::ReqData<String>,
     MultipartForm(form): MultipartForm<UploadForm>,
-) -> HttpResponse {
+) -> Redirect {
     let image_bytes: Vec<u8> = form
         .image
         .file
@@ -79,16 +84,31 @@ async fn change_image(
 
     let mime_type = form.image.content_type.unwrap().to_string();
 
+    let img_format = ImageFormat::from_mime_type(&mime_type).unwrap();
+
+    let image = ImageReader::with_format(Cursor::new(image_bytes), img_format)
+        .decode()
+        .unwrap();
+    let image = image.resize(720, 720, FilterType::Lanczos3);
+
+    // Make webp::Encoder from DynamicImage.
+    let encoder: Encoder = Encoder::from_image(&image).unwrap();
+
+    // Encode image into WebPMemory.
+    let encoded_webp: WebPMemory = encoder.encode(65f32);
+
+    let image_bytes: Vec<u8> = encoded_webp.bytes().map(|x| x.unwrap()).collect();
+
     s3.put_object()
         .bucket("rfinger")
         .key(id.as_str())
         .body(ByteStream::from(image_bytes))
-        .content_type(mime_type)
+        .content_type("image/webp")
         .send()
         .await
         .unwrap();
 
-    HttpResponse::Ok().finish()
+    Redirect::to("/").see_other()
 }
 
 #[get("/me")]
@@ -108,8 +128,11 @@ async fn get_me(s3: web::Data<Client>, id: web::ReqData<String>) -> HttpResponse
 }
 
 #[get("/{file}")]
-async fn get_image(s3: web::Data<Client>, path: web::Path<String>) -> HttpResponse {
-    let expires_in: std::time::Duration = std::time::Duration::from_secs(3600 * 24);
+async fn get_image(
+    s3: web::Data<Client>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let expires_in: std::time::Duration = std::time::Duration::from_secs(3600 * 36);
     let expires_in: aws_sdk_s3::presigning::PresigningConfig =
         PresigningConfig::expires_in(expires_in).unwrap();
 
@@ -123,5 +146,7 @@ async fn get_image(s3: web::Data<Client>, path: web::Path<String>) -> HttpRespon
 
     let url = presigned_request.uri().to_string();
 
-    HttpResponse::Ok().body(url)
+    HttpResponse::Ok()
+        .insert_header(CacheControl(vec![CacheDirective::MaxAge(3600 * 24)]))
+        .body(url)
 }
