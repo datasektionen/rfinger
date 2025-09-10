@@ -6,7 +6,6 @@ use actix_web::web::Redirect;
 use actix_web::{App, get, middleware::Logger, web};
 use actix_web::{HttpResponse, HttpServer, post};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
-use auth::auth_callback;
 use auth::types::{AuthMiddleware, OIDCData};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::Client;
@@ -14,12 +13,20 @@ use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use image::imageops::FilterType;
 use image::{ImageFormat, ImageReader};
-use openidconnect::http::response;
 use std::io::{Cursor, Read};
+use utoipa::OpenApi;
+use utoipa_actix_web::AppExt;
+use utoipa_actix_web::service_config::ServiceConfig;
+use utoipa_redoc::{Redoc, Servable};
 use webp::{Encoder, WebPMemory};
+
+use crate::auth::check_token;
 
 mod auth;
 mod error;
+
+#[derive(OpenApi)]
+struct ApiDoc;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -39,23 +46,46 @@ async fn main() -> std::io::Result<()> {
     let oidc = web::Data::new(oidc);
     let auth_url = auth_url.clone();
 
+    log::info!("redirect url: {auth_url}");
+
     HttpServer::new(move || {
         let cors = Cors::permissive();
         App::new()
-            .wrap(cors)
-            .wrap(Logger::default())
-            .wrap(AuthMiddleware::new(auth_url.clone()))
-            .app_data(client.clone())
-            .app_data(oidc.clone())
-            .service(index)
-            .service(change_image)
-            .service(get_me)
-            .service(auth_callback)
-            .service(get_image)
+            .into_utoipa_app()
+            .map(|app| {
+                app.wrap(Logger::default())
+                    .wrap(cors)
+                    .app_data(client.clone())
+                    .app_data(oidc.clone())
+            })
+            .service(utoipa_actix_web::scope("/auth").configure(auth::config()))
+            .service(utoipa_actix_web::scope("/api").configure(config_api()))
+            .service(
+                utoipa_actix_web::scope("")
+                    .configure(config_interactie())
+                    .map(|app| {
+                        app.service(index)
+                            .wrap(AuthMiddleware::new(auth_url.clone()))
+                    }),
+            )
+            .openapi_service(|api| Redoc::with_url("/docs/api", api))
+            .into_app()
     })
     .bind(("0.0.0.0", 8080))?
     .run()
     .await
+}
+
+fn config_interactie() -> impl FnOnce(&mut ServiceConfig) {
+    |cfg: &mut ServiceConfig| {
+        cfg.service(get_me).service(change_image_interactive);
+    }
+}
+
+fn config_api() -> impl FnOnce(&mut ServiceConfig) {
+    |cfg: &mut ServiceConfig| {
+        cfg.service(get_image);
+    }
 }
 
 #[derive(Debug, MultipartForm)]
@@ -68,8 +98,9 @@ async fn index() -> actix_web::Result<NamedFile> {
     Ok(NamedFile::open("index.html")?)
 }
 
+#[utoipa::path(tag = "interactive")]
 #[post("/")]
-async fn change_image(
+async fn change_image_interactive(
     s3: web::Data<Client>,
     id: web::ReqData<String>,
     MultipartForm(form): MultipartForm<UploadForm>,
@@ -111,6 +142,7 @@ async fn change_image(
     Redirect::to("/").see_other()
 }
 
+#[utoipa::path(tag = "interactive")]
 #[get("/me")]
 async fn get_me(s3: web::Data<Client>, id: web::ReqData<String>) -> HttpResponse {
     let response = s3
@@ -127,17 +159,25 @@ async fn get_me(s3: web::Data<Client>, id: web::ReqData<String>) -> HttpResponse
     HttpResponse::Ok().content_type(mime_type).body(bytes)
 }
 
+#[utoipa::path(tag = "api")]
 #[get("/{file}")]
 async fn get_image(
     s3: web::Data<Client>,
     path: web::Path<String>,
+    auth: BearerAuth,
 ) -> HttpResponse {
+    match check_token(auth.token(), "get").await {
+        Ok(false) => return HttpResponse::Unauthorized().finish(),
+        Ok(true) => {}
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    }
+
     let expires_in: std::time::Duration = std::time::Duration::from_secs(3600 * 36);
     let expires_in: aws_sdk_s3::presigning::PresigningConfig =
         PresigningConfig::expires_in(expires_in).unwrap();
 
     let presigned_request = s3
-        .put_object()
+        .get_object()
         .bucket("rfinger")
         .key(path.as_str())
         .presigned(expires_in)

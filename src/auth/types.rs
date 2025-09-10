@@ -1,23 +1,23 @@
-use std::{collections::HashMap, env, future::Future, pin::Pin};
+use std::{env, future::Future, pin::Pin};
 
 use actix_web::{
-    cookie::{Cookie, SameSite},
     FromRequest, HttpRequest,
+    cookie::{Cookie, SameSite},
 };
-use derive_more::Display;
 use jsonwebtoken::{
-    decode, encode, get_current_timestamp, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, get_current_timestamp,
 };
 use openidconnect::{
+    Client, ClientId, ClientSecret, CsrfToken, EmptyAdditionalClaims, EmptyExtraTokenFields,
+    EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields, IssuerUrl, Nonce, RedirectUrl,
+    RevocationErrorResponseType, StandardErrorResponse, StandardTokenIntrospectionResponse,
+    StandardTokenResponse,
     core::{
         CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreErrorResponseType,
         CoreGenderClaim, CoreJsonWebKey, CoreJweContentEncryptionAlgorithm,
         CoreJwsSigningAlgorithm, CoreProviderMetadata, CoreRevocableToken, CoreTokenType,
     },
-    reqwest, Client, ClientId, ClientSecret, CsrfToken, EmptyAdditionalClaims,
-    EmptyExtraTokenFields, EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields, IssuerUrl,
-    Nonce, RedirectUrl, RevocationErrorResponseType, StandardErrorResponse,
-    StandardTokenIntrospectionResponse, StandardTokenResponse,
+    reqwest,
 };
 
 use crate::error::Error;
@@ -116,6 +116,32 @@ impl OIDCData {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HivePermission {
+    pub id: String,
+    pub scope: Option<String>,
+}
+
+impl HivePermission {
+    pub async fn get(token: String) -> Result<Vec<HivePermission>, Error> {
+        log::debug!("getting hive permissions token {token}");
+        let client = reqwest::Client::new();
+        let res = client
+            .get(format!(
+                "{}/token/{}/permissions",
+                env::var("HIVE_URL")?,
+                token.as_str()
+            ))
+            .bearer_auth(env::var("HIVE_SECRET")?)
+            .send()
+            .await?
+            .text()
+            .await?;
+
+        Ok(serde_json::from_str::<Vec<HivePermission>>(&res)?)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Token {
     pub sub: String,
@@ -124,7 +150,6 @@ pub struct Token {
 
 impl Token {
     pub fn new(sub: String) -> Option<Self> {
-
         Some(Token {
             sub,
             exp: get_current_timestamp() + 7200,
@@ -174,9 +199,7 @@ pub struct AuthMiddleware {
 
 impl AuthMiddleware {
     pub fn new(auth_url: String) -> Self {
-        AuthMiddleware {
-            auth_url,
-        }
+        AuthMiddleware { auth_url }
     }
 }
 

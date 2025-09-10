@@ -2,7 +2,6 @@ FROM rust:1.87-alpine AS build
 WORKDIR /build
 
 RUN apk update && apk add git alpine-sdk make libffi-dev openssl-dev pkgconfig bash
-RUN cargo install cargo-watch
 
 COPY Cargo.lock Cargo.toml .
 
@@ -18,4 +17,4 @@ EXPOSE 8000
 
 ENV RUST_LOG=debug
 
-CMD ["cargo", "watch", "--why", "-x", "run"]
+CMD ["cargo", "run"]

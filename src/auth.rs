@@ -1,10 +1,8 @@
-#![warn(missing_docs)]
-
 use actix_web::{
     HttpMessage, HttpResponse,
     body::{EitherBody, MessageBody},
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
-    get, post, web,
+    get, web,
 };
 use jsonwebtoken::get_current_timestamp;
 use openidconnect::{
@@ -22,6 +20,7 @@ use std::{
 use types::{
     AuthMiddleware, AuthTokenResponse, InnerAuthMiddleware, LocalBoxFuture, OIDCData, Token,
 };
+use utoipa_actix_web::{scope, service_config::ServiceConfig};
 
 use crate::error::Error;
 
@@ -33,8 +32,20 @@ struct CallbackQuery {
     state: String,
 }
 
-#[get("/api/oidc/callback")]
-pub async fn auth_callback(
+pub(crate) fn config() -> impl FnOnce(&mut ServiceConfig) {
+    |cfg: &mut ServiceConfig| {
+        cfg.service(scope("/oidc").service(callback));
+    }
+}
+
+#[utoipa::path(
+    tag = "auth",
+    responses(
+        (status = 200, description = "OIDC callback function")
+    )
+)]
+#[get("/callback")]
+async fn callback(
     query: web::Query<CallbackQuery>,
     oidc: web::Data<OIDCData>,
 ) -> Result<HttpResponse, Error> {
@@ -118,6 +129,24 @@ fn check_token_hash(
     Ok(())
 }
 
+pub(crate) async fn check_token(token: &str, perm: &str) -> Result<bool, Error> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "{}/token/{}/permission/{}",
+            env::var("HIVE_URL")?,
+            token,
+            perm
+        ))
+        .bearer_auth(env::var("HIVE_SECRET")?)
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    Ok(serde_json::from_str::<bool>(&response).unwrap_or(false))
+}
+
 impl<S, B> Transform<S, ServiceRequest> for AuthMiddleware
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
@@ -151,44 +180,31 @@ where
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
-        if req.path().contains("oidc") || req.path().contains("static") {
-            let res = self.service.call(req);
-            return Box::pin(async move { res.await.map(ServiceResponse::map_into_left_body) });
-        }
-
-        if let Some(token) = Token::extract_token(req.cookie("token")) {
-            req.extensions_mut().insert(token.sub);
-            let res = self.service.call(req);
-
-            Box::pin(async move {
-                let res = res.await.unwrap();
-
-                Ok(res.map_into_left_body())
-            })
+        let mut token = if let Some(token) = Token::extract_token(req.cookie("token")) {
+            log::debug!("{:?}", token);
+            token
         } else {
-            auth_error_response(req, self.auth_url.clone())
-        }
-    }
-}
+            let response = HttpResponse::TemporaryRedirect()
+                .insert_header(("location", self.auth_url.clone()))
+                .finish()
+                .map_into_right_body();
 
-fn auth_error_response<B>(
-    req: ServiceRequest,
-    auth_url: String,
-) -> LocalBoxFuture<Result<ServiceResponse<EitherBody<B>>, actix_web::Error>>
-where
-    B: 'static,
-{
-    if env::var("APP_AUTH") == Ok(String::from("false")) {
-        let response = HttpResponse::Unauthorized().finish().map_into_right_body();
-        let (request, _pl) = req.into_parts();
-        Box::pin(async move { Ok(ServiceResponse::new(request, response)) })
-    } else {
-        let response = HttpResponse::TemporaryRedirect()
-            .insert_header(("location", auth_url))
-            .finish()
-            .map_into_right_body();
+            let (request, _pl) = req.into_parts();
+            return Box::pin(async move { Ok(ServiceResponse::new(request, response)) });
+        };
 
-        let (request, _pl) = req.into_parts();
-        Box::pin(async move { Ok(ServiceResponse::new(request, response)) })
+        req.extensions_mut().insert(token.sub.clone());
+
+        let res = self.service.call(req);
+
+        Box::pin(async move {
+            let mut res = res.await.unwrap();
+
+            token.exp = get_current_timestamp() + 7200;
+            let cookie = token.cookie().unwrap();
+            res.response_mut().add_cookie(&cookie).unwrap();
+
+            Ok(res.map_into_left_body())
+        })
     }
 }
