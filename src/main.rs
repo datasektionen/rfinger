@@ -223,7 +223,13 @@ async fn main() -> std::io::Result<()> {
             .openapi_service(|api| Redoc::with_url("/docs/api", api))
             .into_app()
     })
-    .bind(("0.0.0.0", 8080))?
+    .bind((
+        "0.0.0.0",
+        env::var("PORT")
+            .expect("port env variable")
+            .parse::<u16>()
+            .expect("port to number"),
+    ))?
     .run()
     .await
 }
