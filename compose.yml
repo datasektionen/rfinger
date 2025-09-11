@@ -1,16 +1,22 @@
 services:
-  # app:
-  #   build:
-  #     dockerfile: Dockerfile
-  #   environment:
-  #     - RUST_LOG=debug
-  #     - AWS_ACCESS_KEY_ID=test
-  #     - AWS_SECRET_ACCESS_KEY=test
-  #     - OIDC_ID=client-id
-  #     - OIDC_SECRET=client-secret
-  #     - OIDC_PROVIDER=http://localhost:7003
-  #     - REDIRECT_URL=http://localhost:8080/api/oidc/callback
-  #     - APP_SECRET=YLyhFi9lp1oPP5Ld2XXFUILcDX3QQgGRkPeyvKaOtMjGqM1jvP4jPM7Y0yh50qgE
+  app:
+    build:
+      dockerfile: Dockerfile.dev
+    ports:
+      - 8080:8080
+    environment:
+      - RUST_LOG=debug
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - S3_BUCKET=rfinger
+      - OIDC_ID=client-id
+      - OIDC_SECRET=client-secret
+      - OIDC_PROVIDER=http://nyckeln:7003
+      - REDIRECT_URL=http://localhost:8080/auth/oidc/callback
+      - APP_SECRET=<insert app secret>
+      - HIVE_URL=https://hive.datasektionen.se/api/v1
+      - HIVE_SECRET=<insert hive api secret>
+
   s3mock:
     image: adobe/s3mock:latest
     environment:
