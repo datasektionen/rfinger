@@ -4,21 +4,25 @@ use actix_multipart::form::{MultipartForm, tempfile::TempFile};
 use actix_web::{
     App, HttpResponse, HttpServer, get,
     middleware::Logger,
+    mime::Mime,
     post,
     web::{self, Redirect},
 };
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use auth::types::{AuthMiddleware, OIDCData};
 use aws_config::{BehaviorVersion, Region};
-use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::error::{DisplayErrorContext, SdkError};
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_smithy_runtime_api::http::Response;
 use image::imageops::FilterType;
 use image::{ImageFormat, ImageReader};
-use std::fmt::Display;
-use std::io::{Cursor, Read};
+use std::{env, fmt::Display};
+use std::{
+    io::{Cursor, Read},
+    str::FromStr,
+};
 use utoipa::OpenApi;
 use utoipa_actix_web::AppExt;
 use utoipa_actix_web::service_config::ServiceConfig;
@@ -31,6 +35,7 @@ mod auth;
 mod error;
 
 enum PathType {
+    Compressed(String),
     Personal(String),
     Original(String),
     Missing,
@@ -39,6 +44,12 @@ enum PathType {
 impl Display for PathType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PathType::Compressed(kthid) => {
+                let mut chars = kthid.chars();
+                let first = chars.next().unwrap();
+                let second = chars.next().unwrap();
+                write!(f, "compressed_images/{first}/{second}/{kthid}")
+            }
             PathType::Personal(kthid) => {
                 let mut chars = kthid.chars();
                 let first = chars.next().unwrap();
@@ -65,12 +76,12 @@ impl Client {
         let config = aws_config::load_defaults(BehaviorVersion::latest())
             .await
             .into_builder()
-            .endpoint_url("http://localhost:9090")
-            .region(Region::new("us-west-2"))
+            // .endpoint_url("http://localhost:9090")
+            .region(Region::new("eu-west-1"))
             .build();
 
         let config = aws_sdk_s3::config::Builder::from(&config)
-            .force_path_style(true)
+            // .force_path_style(true)
             .build();
         let client = aws_sdk_s3::Client::from_conf(config);
 
@@ -80,7 +91,13 @@ impl Client {
         &self,
         kthid: &str,
     ) -> Result<GetObjectOutput, SdkError<GetObjectError, Response>> {
-        let mut key = PathType::Personal(kthid.to_string());
+        let mut key = PathType::Compressed(kthid.to_string());
+
+        if let Ok(image) = self.get_object(&key.to_string()).await {
+            return Ok(image);
+        }
+
+        key = PathType::Personal(kthid.to_string());
 
         if let Ok(image) = self.get_object(&key.to_string()).await {
             return Ok(image);
@@ -103,7 +120,7 @@ impl Client {
     ) -> Result<GetObjectOutput, SdkError<GetObjectError, Response>> {
         self.s3_client
             .get_object()
-            .bucket("rfinger")
+            .bucket(env::var("S3_BUCKET").expect("bucket name env"))
             .key(key.to_string())
             .send()
             .await
@@ -112,22 +129,48 @@ impl Client {
     async fn put_image(
         &self,
         path: PathType,
-        image: ByteStream,
+        kthid: String,
+        image: TempFile,
     ) -> Result<PutObjectOutput, SdkError<PutObjectError, Response>> {
+        let image_bytes = get_bytes(&image);
+
+        if let Err(error) = self
+            .s3_client
+            .put_object()
+            .bucket(env::var("S3_BUCKET").expect("bucket name env"))
+            .key(path.to_string())
+            .body(ByteStream::from(image_bytes.clone()))
+            .content_type(
+                image
+                    .content_type
+                    .clone()
+                    .unwrap_or(Mime::from_str("image/jpeg").unwrap())
+                    .to_string(),
+            )
+            .send()
+            .await
+        {
+            return Err(error);
+        }
+
+        let image_bytes = process_image(image_bytes, image);
+
         self.s3_client
             .put_object()
-            .bucket("rfinger")
-            .key(path.to_string())
-            .body(image)
+            .bucket(env::var("S3_BUCKET").expect("bucket name env"))
+            .key(PathType::Compressed(kthid).to_string())
+            .body(ByteStream::from(image_bytes))
             .content_type("image/webp")
             .send()
             .await
     }
 }
 
-fn process_image(image: TempFile) -> Vec<u8> {
-    let image_bytes: Vec<u8> = image.file.as_file().bytes().map(|x| x.unwrap()).collect();
+fn get_bytes(image: &TempFile) -> Vec<u8> {
+    image.file.as_file().bytes().map(|x| x.unwrap()).collect()
+}
 
+fn process_image(image_bytes: Vec<u8>, image: TempFile) -> Vec<u8> {
     let mime_type = image.content_type.unwrap().to_string();
 
     let img_format = ImageFormat::from_mime_type(&mime_type).unwrap();
@@ -136,7 +179,7 @@ fn process_image(image: TempFile) -> Vec<u8> {
         .decode()
         .unwrap();
 
-    let image = image.resize(720, 720, FilterType::Lanczos3);
+    let image = image.resize(200, 200, FilterType::Lanczos3);
 
     // Make webp::Encoder from DynamicImage.
     let encoder: Encoder = Encoder::from_image(&image).unwrap();
@@ -156,8 +199,6 @@ async fn main() -> std::io::Result<()> {
     let client = web::Data::new(Client::new().await);
     let (oidc, auth_url) = OIDCData::get_oidc().await;
     let oidc = web::Data::new(oidc);
-
-    log::info!("redirect url: {auth_url}");
 
     HttpServer::new(move || {
         let cors = Cors::permissive();
@@ -216,12 +257,11 @@ async fn upload_interactive(
     kthid: web::ReqData<String>,
     MultipartForm(form): MultipartForm<UploadForm>,
 ) -> Redirect {
-    let image_bytes: Vec<u8> = process_image(form.image);
-
     if s3
         .put_image(
             PathType::Personal(kthid.to_string()),
-            ByteStream::from(image_bytes),
+            kthid.to_string(),
+            form.image,
         )
         .await
         .is_ok()
@@ -256,15 +296,23 @@ async fn get(s3: web::Data<Client>, kthid: web::Path<String>, auth: BearerAuth) 
     match check_token(auth.token(), "get").await {
         Ok(false) => return HttpResponse::Unauthorized().finish(),
         Ok(true) => {}
-        Err(_) => return HttpResponse::InternalServerError().finish(),
+        Err(error) => {
+            log::error!("failed to check token: {error}");
+            return HttpResponse::InternalServerError().finish();
+        }
     }
 
     let response = s3.get_image(&kthid.to_string()).await;
 
-    let response = if let Ok(res) = response {
-        res
-    } else {
-        return HttpResponse::InternalServerError().finish();
+    let response = match response {
+        Ok(res) => res,
+        Err(error) => {
+            log::error!(
+                "failed to get image {kthid}: {}",
+                DisplayErrorContext(error)
+            );
+            return HttpResponse::InternalServerError().finish();
+        }
     };
 
     let data = response.body.collect().await.unwrap();
@@ -288,12 +336,11 @@ async fn upload(
         Err(_) => return HttpResponse::InternalServerError().finish(),
     }
 
-    let image_bytes: Vec<u8> = process_image(form.image);
-
     if s3
         .put_image(
             PathType::Personal(kthid.to_string()),
-            ByteStream::from(image_bytes),
+            kthid.to_string(),
+            form.image,
         )
         .await
         .is_ok()
@@ -318,12 +365,11 @@ async fn nollan(
         Err(_) => return HttpResponse::InternalServerError().finish(),
     }
 
-    let image_bytes: Vec<u8> = process_image(form.image);
-
     if s3
         .put_image(
             PathType::Original(kthid.to_string()),
-            ByteStream::from(image_bytes),
+            kthid.to_string(),
+            form.image,
         )
         .await
         .is_ok()
