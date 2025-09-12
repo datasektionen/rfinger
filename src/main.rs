@@ -18,12 +18,13 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_smithy_runtime_api::http::Response;
 use image::imageops::FilterType;
 use image::{ImageFormat, ImageReader};
+use serde::Deserialize;
 use std::{env, fmt::Display};
 use std::{
     io::{Cursor, Read},
     str::FromStr,
 };
-use utoipa::OpenApi;
+use utoipa::{IntoParams, OpenApi};
 use utoipa_actix_web::AppExt;
 use utoipa_actix_web::service_config::ServiceConfig;
 use utoipa_redoc::{Redoc, Servable};
@@ -33,6 +34,11 @@ use crate::auth::check_token;
 
 mod auth;
 mod error;
+
+#[derive(Debug, Deserialize, IntoParams)]
+struct GetQuery {
+    quality: Option<bool>,
+}
 
 enum PathType {
     Compressed(String),
@@ -90,11 +96,16 @@ impl Client {
     async fn get_image(
         &self,
         kthid: &str,
+        quality: bool,
     ) -> Result<GetObjectOutput, SdkError<GetObjectError, Response>> {
-        let mut key = PathType::Compressed(kthid.to_string());
+        let mut key;
 
-        if let Ok(image) = self.get_object(&key.to_string()).await {
-            return Ok(image);
+        if !quality {
+            key = PathType::Compressed(kthid.to_string());
+
+            if let Ok(image) = self.get_object(&key.to_string()).await {
+                return Ok(image);
+            }
         }
 
         key = PathType::Personal(kthid.to_string());
@@ -280,8 +291,14 @@ async fn upload_interactive(
 
 #[utoipa::path(tag = "interactive")]
 #[get("/me")]
-async fn me(s3: web::Data<Client>, id: web::ReqData<String>) -> HttpResponse {
-    let response = s3.get_image(&id.to_string()).await;
+async fn me(
+    s3: web::Data<Client>,
+    id: web::ReqData<String>,
+    query: web::Query<GetQuery>,
+) -> HttpResponse {
+    let response = s3
+        .get_image(&id.to_string(), query.quality.unwrap_or(false))
+        .await;
 
     let response = if let Ok(res) = response {
         res
@@ -298,7 +315,12 @@ async fn me(s3: web::Data<Client>, id: web::ReqData<String>) -> HttpResponse {
 
 #[utoipa::path(tag = "api")]
 #[get("/{kthid}")]
-async fn get(s3: web::Data<Client>, kthid: web::Path<String>, auth: BearerAuth) -> HttpResponse {
+async fn get(
+    s3: web::Data<Client>,
+    kthid: web::Path<String>,
+    query: web::Query<GetQuery>,
+    auth: BearerAuth,
+) -> HttpResponse {
     match check_token(auth.token(), "get").await {
         Ok(false) => return HttpResponse::Unauthorized().finish(),
         Ok(true) => {}
@@ -308,7 +330,9 @@ async fn get(s3: web::Data<Client>, kthid: web::Path<String>, auth: BearerAuth) 
         }
     }
 
-    let response = s3.get_image(&kthid.to_string()).await;
+    let response = s3
+        .get_image(&kthid.to_string(), query.quality.unwrap_or(false))
+        .await;
 
     let response = match response {
         Ok(res) => res,

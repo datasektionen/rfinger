@@ -5,14 +5,30 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>rfinger</title>
         <link href="css/style.css" rel="stylesheet">
+        <link
+            rel="stylesheet"
+            href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"
+        >
     </head>
     <body>
-        <img src="http://localhost:8080/me" alt="Your profile picture" style="max-width: 10%; height: auto;" />
-        <form method="post" enctype="multipart/form-data" action="/">
-            <input type="file" name="image" value="profile picture" accept="image/*">
-            <input type="submit" name="submit" value="submit" />
-        </form>
-        <p>test</p>
+        <main class="container">
+            <article style="display: flex; flex-direction: column; align-items: center;">
+                <section style="display: flex; flex-direction: column; align-items: center;">
+                    <h1>Din bild</h1>
+                    <img src="http://localhost:8080/me?quality=true" style="max-height: 50vh; width: auto; border-radius: 10px;" alt="Your profile picture" />
+                </section>
+                <section style="display: flex; flex-direction: column; align-items: center;">
+                    <h2>Profil bild</h2>
+                    <img src="http://localhost:8080/me" style="height: 100px; width: 100px; object-fit: cover; clip-path: circle(50%);" alt="Your profile picture" />
+                </section>
+                <form method="post" enctype="multipart/form-data" style="width: 50%;" action="/">
+                    <fieldset role="group">
+                        <input type="file" name="image" value="profile picture" accept="image/*">
+                        <input type="submit" name="submit" value="submit" />
+                    </fieldset>
+                </form>
+            </article>
+        </main>
     </body>
 </html>
 
