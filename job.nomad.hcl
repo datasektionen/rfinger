@@ -39,7 +39,7 @@ RUST_LOG=info
 S3_BUCKET=zfinger
 OIDC_ID=rfinger
 OIDC_PROVIDER=https://sso.datasektionen.se/op
-REDIRECT_URL=http://rfinger.datasektionen.se/auth/oidc/callback
+REDIRECT_URL=https://rfinger.datasektionen.se/auth/oidc/callback
 HIVE_URL=https://hive.datasektionen.se/api/v1
 ENV
         destination = "local/.env"
