@@ -190,7 +190,7 @@ fn process_image(image_bytes: Vec<u8>, image: TempFile) -> Vec<u8> {
         .decode()
         .unwrap();
 
-    let image = image.resize(200, 200, FilterType::Lanczos3);
+    let image = image.resize(480, 480, FilterType::Lanczos3);
 
     // Make webp::Encoder from DynamicImage.
     let encoder: Encoder = Encoder::from_image(&image).unwrap();
