@@ -3,12 +3,17 @@ use std::{
     fmt::{Display, Formatter},
 };
 
-use actix_web::{http::StatusCode, HttpResponse, ResponseError};
+use actix_web::{HttpResponse, ResponseError, http::StatusCode};
+use aws_sdk_s3::{
+    error::DisplayErrorContext,
+    operation::{get_object::GetObjectError, put_object::PutObjectError},
+};
 use derive_more::Display;
+use image::ImageError;
 use openidconnect::{
-    core::CoreErrorResponseType, reqwest, ClaimsVerificationError,
-    ConfigurationError, HttpClientError, RequestTokenError,
-    SignatureVerificationError, SigningError, StandardErrorResponse,
+    ClaimsVerificationError, ConfigurationError, HttpClientError, RequestTokenError,
+    SignatureVerificationError, SigningError, StandardErrorResponse, core::CoreErrorResponseType,
+    reqwest,
 };
 
 #[derive(Debug, Display)]
@@ -88,5 +93,55 @@ where
         value: RequestTokenError<HttpClientError<ER>, StandardErrorResponse<CoreErrorResponseType>>,
     ) -> Self {
         Error::InternalServerError(format!("token request error: {}", value))
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(value: std::io::Error) -> Self {
+        Error::InternalServerError(format!("{value}"))
+    }
+}
+
+impl From<ImageError> for Error {
+    fn from(value: ImageError) -> Self {
+        Error::InternalServerError(format!("{value}"))
+    }
+}
+
+impl From<&str> for Error {
+    fn from(value: &str) -> Self {
+        Error::InternalServerError(format!("{value}"))
+    }
+}
+
+impl From<aws_smithy_types::byte_stream::error::Error> for Error {
+    fn from(value: aws_smithy_types::byte_stream::error::Error) -> Self {
+        Error::InternalServerError(format!("failed to get image bytes: {value}"))
+    }
+}
+
+impl From<aws_sdk_s3::error::SdkError<GetObjectError, aws_smithy_runtime_api::http::Response>>
+    for Error
+{
+    fn from(
+        value: aws_sdk_s3::error::SdkError<GetObjectError, aws_smithy_runtime_api::http::Response>,
+    ) -> Self {
+        Error::InternalServerError(format!(
+            "failed to put object in s3: {}",
+            DisplayErrorContext(value)
+        ))
+    }
+}
+
+impl From<aws_sdk_s3::error::SdkError<PutObjectError, aws_smithy_runtime_api::http::Response>>
+    for Error
+{
+    fn from(
+        value: aws_sdk_s3::error::SdkError<PutObjectError, aws_smithy_runtime_api::http::Response>,
+    ) -> Self {
+        Error::InternalServerError(format!(
+            "failed to put object in s3: {}",
+            DisplayErrorContext(value)
+        ))
     }
 }
