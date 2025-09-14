@@ -3543,6 +3543,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-runtime-api",
+ "aws-smithy-types",
  "crypto",
  "derive_more 2.0.1",
  "env_logger",
