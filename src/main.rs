@@ -6,16 +6,19 @@ use actix_web::{
     middleware::Logger,
     mime::Mime,
     post,
-    web::{self, Redirect},
+    web::{self, Bytes, Redirect},
 };
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use auth::types::{AuthMiddleware, OIDCData};
 use aws_config::{BehaviorVersion, Region};
-use aws_sdk_s3::error::{DisplayErrorContext, SdkError};
+use aws_sdk_s3::error::DisplayErrorContext;
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
 use aws_sdk_s3::primitives::ByteStream;
-use aws_smithy_runtime_api::http::Response;
+use aws_smithy_runtime_api::{
+    client::result::{ResponseError, SdkError},
+    http::Response,
+};
 use image::imageops::FilterType;
 use image::{ImageFormat, ImageReader};
 use serde::Deserialize;
@@ -97,32 +100,77 @@ impl Client {
         &self,
         kthid: &str,
         quality: bool,
-    ) -> Result<GetObjectOutput, SdkError<GetObjectError, Response>> {
+    ) -> Result<(Bytes, String), SdkError<GetObjectError, Response>> {
         let mut key;
 
         if !quality {
             key = PathType::Compressed(kthid.to_string());
 
             if let Ok(image) = self.get_object(&key.to_string()).await {
-                return Ok(image);
+                let image_bytes = image.body.collect().await.unwrap().into_bytes();
+                let mime_type = image.content_type.clone().unwrap_or_default();
+                return Ok((image_bytes, mime_type));
             }
         }
 
         key = PathType::Personal(kthid.to_string());
 
         if let Ok(image) = self.get_object(&key.to_string()).await {
-            return Ok(image);
+            let image_bytes = image.body.collect().await.unwrap().into_bytes();
+            let mime_type = image.content_type.clone().unwrap_or_default();
+            if !quality {
+                let compressed = process_image(image_bytes.to_vec(), &mime_type);
+                self.put_object(
+                    PathType::Compressed(kthid.to_string()),
+                    compressed.clone(),
+                    "image/webp",
+                )
+                .await
+                .unwrap();
+
+                return Ok((Bytes::from(compressed), String::from("image/webp")));
+            } else {
+                return Ok((image_bytes, mime_type));
+            }
         }
 
         key = PathType::Original(kthid.to_string());
 
         if let Ok(image) = self.get_object(&key.to_string()).await {
-            return Ok(image);
+            let image_bytes = image.body.collect().await.unwrap().into_bytes();
+            let mime_type = image.content_type.clone().unwrap_or_default();
+            if !quality {
+                let compressed = process_image(image_bytes.to_vec(), &mime_type);
+                self.put_object(
+                    PathType::Compressed(kthid.to_string()),
+                    compressed.clone(),
+                    "image/webp",
+                )
+                .await
+                .unwrap();
+
+                return Ok((Bytes::from(compressed), mime_type));
+            } else {
+                return Ok((image_bytes, mime_type));
+            }
         }
 
         key = PathType::Missing;
 
-        self.get_object(&key.to_string()).await
+        match self.get_object(&key.to_string()).await {
+            Ok(image) => {
+                let image_bytes = image
+                    .body
+                    .collect()
+                    .await
+                    .ok()
+                    .ok_or(SdkError::ResponseError(ResponseError::builder().build()))?
+                    .into_bytes();
+                let mime_type = image.content_type.clone().unwrap_or_default();
+                Ok((image_bytes, mime_type))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn get_object(
@@ -140,38 +188,36 @@ impl Client {
     async fn put_image(
         &self,
         path: PathType,
-        kthid: String,
-        image: TempFile,
+        kthid: &str,
+        image_bytes: Vec<u8>,
+        mime_type: &str,
     ) -> Result<PutObjectOutput, SdkError<PutObjectError, Response>> {
-        let image_bytes = get_bytes(&image);
-
-        if let Err(error) = self
-            .s3_client
-            .put_object()
-            .bucket(env::var("S3_BUCKET").expect("bucket name env"))
-            .key(path.to_string())
-            .body(ByteStream::from(image_bytes.clone()))
-            .content_type(
-                image
-                    .content_type
-                    .clone()
-                    .unwrap_or(Mime::from_str("image/jpeg").unwrap())
-                    .to_string(),
-            )
-            .send()
-            .await
-        {
+        if let Err(error) = self.put_object(path, image_bytes.clone(), &mime_type).await {
             return Err(error);
         }
 
-        let image_bytes = process_image(image_bytes, image);
+        let image_bytes = process_image(image_bytes, mime_type);
 
+        self.put_object(
+            PathType::Compressed(kthid.to_string()),
+            image_bytes,
+            "image/webp",
+        )
+        .await
+    }
+
+    async fn put_object(
+        &self,
+        path: PathType,
+        image_bytes: Vec<u8>,
+        content_type: &str,
+    ) -> Result<PutObjectOutput, SdkError<PutObjectError, Response>> {
         self.s3_client
             .put_object()
             .bucket(env::var("S3_BUCKET").expect("bucket name env"))
-            .key(PathType::Compressed(kthid).to_string())
+            .key(path.to_string())
             .body(ByteStream::from(image_bytes))
-            .content_type("image/webp")
+            .content_type(content_type)
             .send()
             .await
     }
@@ -181,9 +227,7 @@ fn get_bytes(image: &TempFile) -> Vec<u8> {
     image.file.as_file().bytes().map(|x| x.unwrap()).collect()
 }
 
-fn process_image(image_bytes: Vec<u8>, image: TempFile) -> Vec<u8> {
-    let mime_type = image.content_type.unwrap().to_string();
-
+fn process_image(image_bytes: Vec<u8>, mime_type: &str) -> Vec<u8> {
     let img_format = ImageFormat::from_mime_type(&mime_type).unwrap();
 
     let image = ImageReader::with_format(Cursor::new(image_bytes), img_format)
@@ -277,8 +321,13 @@ async fn upload_interactive(
     if s3
         .put_image(
             PathType::Personal(kthid.to_string()),
-            kthid.to_string(),
-            form.image,
+            kthid.as_ref(),
+            get_bytes(&form.image),
+            &form
+                .image
+                .content_type
+                .unwrap_or(Mime::from_str("image/jpeg").unwrap())
+                .to_string(),
         )
         .await
         .is_ok()
@@ -300,17 +349,11 @@ async fn me(
         .get_image(&id.to_string(), query.quality.unwrap_or(false))
         .await;
 
-    let response = if let Ok(res) = response {
-        res
+    if let Ok((bytes, mime_type)) = response {
+        HttpResponse::Ok().content_type(mime_type).body(bytes)
     } else {
-        return HttpResponse::InternalServerError().finish();
-    };
-
-    let data = response.body.collect().await.unwrap();
-    let mime_type = response.content_type.unwrap();
-    let bytes = data.into_bytes();
-
-    HttpResponse::Ok().content_type(mime_type).body(bytes)
+        HttpResponse::InternalServerError().finish()
+    }
 }
 
 #[utoipa::path(tag = "api")]
@@ -334,22 +377,16 @@ async fn get(
         .get_image(&kthid.to_string(), query.quality.unwrap_or(false))
         .await;
 
-    let response = match response {
-        Ok(res) => res,
+    match response {
+        Ok((bytes, mime_type)) => HttpResponse::Ok().content_type(mime_type).body(bytes),
         Err(error) => {
             log::error!(
                 "failed to get image {kthid}: {}",
                 DisplayErrorContext(error)
             );
-            return HttpResponse::InternalServerError().finish();
+            HttpResponse::InternalServerError().finish()
         }
-    };
-
-    let data = response.body.collect().await.unwrap();
-    let mime_type = response.content_type.unwrap();
-    let bytes = data.into_bytes();
-
-    HttpResponse::Ok().content_type(mime_type).body(bytes)
+    }
 }
 
 #[utoipa::path(tag = "api")]
@@ -369,8 +406,13 @@ async fn upload(
     if s3
         .put_image(
             PathType::Personal(kthid.to_string()),
-            kthid.to_string(),
-            form.image,
+            kthid.as_ref(),
+            get_bytes(&form.image),
+            &form
+                .image
+                .content_type
+                .unwrap_or(Mime::from_str("image/jpeg").unwrap())
+                .to_string(),
         )
         .await
         .is_ok()
@@ -398,8 +440,13 @@ async fn nollan(
     if s3
         .put_image(
             PathType::Original(kthid.to_string()),
-            kthid.to_string(),
-            form.image,
+            kthid.as_ref(),
+            get_bytes(&form.image),
+            &form
+                .image
+                .content_type
+                .unwrap_or(Mime::from_str("image/jpeg").unwrap())
+                .to_string(),
         )
         .await
         .is_ok()
