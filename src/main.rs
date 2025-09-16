@@ -146,7 +146,7 @@ async fn get(
     query: web::Query<GetQuery>,
     auth: BearerAuth,
 ) -> Result<HttpResponse, Error> {
-    if check_token(auth.token(), "get").await? {
+    if !check_token(auth.token(), "get").await? {
         return Err(Error::Unauthorized);
     }
 
@@ -166,7 +166,7 @@ async fn upload(
     auth: BearerAuth,
     MultipartForm(form): MultipartForm<UploadForm>,
 ) -> Result<HttpResponse, Error> {
-    if check_token(auth.token(), "upload").await? {
+    if !check_token(auth.token(), "upload").await? {
         return Err(Error::Unauthorized);
     }
 
@@ -194,7 +194,7 @@ async fn nollan(
     auth: BearerAuth,
     MultipartForm(form): MultipartForm<UploadForm>,
 ) -> Result<HttpResponse, Error> {
-    if check_token(auth.token(), "nollan").await? {
+    if !check_token(auth.token(), "nollan").await? {
         return Err(Error::Unauthorized);
     }
 
