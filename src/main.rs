@@ -56,8 +56,12 @@ async fn main() -> std::io::Result<()> {
             })
             .service(utoipa_actix_web::scope("/auth").configure(auth::config()))
             .service(utoipa_actix_web::scope("/api").configure(config_api()))
-            .service(me)
-            .service(upload_interactive)
+            .service(
+                utoipa_actix_web::scope("/me")
+                    .service(me)
+                    .service(upload_interactive)
+                    .map(|app| app.wrap(AuthMiddleware::new(auth_url.clone()))),
+            )
             .openapi_service(|api| Redoc::with_url("/docs/api", api))
             .service(utoipa_actix_web::scope("").map(|app| {
                 app.service(index)
@@ -120,7 +124,7 @@ async fn upload_interactive(
 
 /// Get a picture of the currently logged in user
 #[utoipa::path(tag = "interactive", params(GetQuery))]
-#[get("/me")]
+#[get("/")]
 async fn me(
     s3: web::Data<Client>,
     id: web::ReqData<String>,

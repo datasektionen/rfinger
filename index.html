@@ -15,13 +15,13 @@
             <article style="display: flex; flex-direction: column; align-items: center;">
                 <section style="display: flex; flex-direction: column; align-items: center;">
                     <h1>Din bild</h1>
-                    <img src="/me?quality=true" style="max-height: 50vh; width: auto; border-radius: 10px;" alt="Your profile picture" />
+                    <img src="/me/?quality=true" style="max-height: 50vh; width: auto; border-radius: 10px;" alt="Your profile picture" />
                 </section>
                 <section style="display: flex; flex-direction: column; align-items: center;">
                     <h2>Profil bild</h2>
-                    <img src="/me" style="height: 100px; width: 100px; object-fit: cover; clip-path: circle(50%);" alt="Your profile picture" />
+                    <img src="/me/" style="height: 100px; width: 100px; object-fit: cover; clip-path: circle(50%);" alt="Your profile picture" />
                 </section>
-                <form method="post" enctype="multipart/form-data" style="width: 50%;" action="/">
+                <form method="post" enctype="multipart/form-data" style="width: 50%;" action="/me/">
                     <fieldset role="group">
                         <input type="file" name="image" value="profile picture" accept="image/*">
                         <input type="submit" name="submit" value="submit" />
