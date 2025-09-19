@@ -16,6 +16,7 @@ use aws_sdk_s3::{
     },
     presigning::{PresignedRequest, PresigningConfig},
     primitives::ByteStream,
+    types::error::{InvalidObjectState, NoSuchKey},
 };
 use aws_smithy_runtime_api::http::Response;
 use image::{ImageFormat, ImageReader, imageops::FilterType};
@@ -269,6 +270,19 @@ impl Client {
         &self,
         key: &str,
     ) -> Result<PresignedRequest, SdkError<GetObjectError, Response>> {
+        if let Err(err) = self
+            .s3_client
+            .head_object()
+            .bucket(env::var("S3_BUCKET").expect("bucket name env"))
+            .key(key.to_string())
+            .send()
+            .await
+        {
+            return Err(
+                err.map_service_error(|_| GetObjectError::NoSuchKey(NoSuchKey::builder().build()))
+            );
+        }
+
         let config = PresigningConfig::expires_in(Duration::from_secs(12 * 3600)).unwrap();
 
         self.s3_client
