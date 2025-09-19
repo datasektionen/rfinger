@@ -15,6 +15,7 @@ use openidconnect::{
     SignatureVerificationError, SigningError, StandardErrorResponse, core::CoreErrorResponseType,
     reqwest,
 };
+use reqwest::header::ToStrError;
 
 #[derive(Debug, Display)]
 pub enum Error {
@@ -39,6 +40,12 @@ impl ResponseError for Error {
             Error::Unauthorized => StatusCode::UNAUTHORIZED,
             Error::BadRequest => StatusCode::BAD_REQUEST,
         }
+    }
+}
+
+impl From<ToStrError> for Error {
+    fn from(value: ToStrError) -> Self {
+        Error::InternalServerError(value.to_string())
     }
 }
 
@@ -74,13 +81,13 @@ impl From<SigningError> for Error {
 
 impl From<VarError> for Error {
     fn from(value: VarError) -> Self {
-        Error::InternalServerError(format!("getting pls url error: {}", value))
+        Error::InternalServerError(format!("env var error: {}", value))
     }
 }
 
 impl From<reqwest::Error> for Error {
     fn from(value: reqwest::Error) -> Self {
-        Error::InternalServerError(format!("failed to get data from pls: {}", value))
+        Error::InternalServerError(format!("failed to get data with request: {}", value))
     }
 }
 

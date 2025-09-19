@@ -141,7 +141,7 @@ async fn me(
     }
 }
 
-/// Get a picture of a user using the api
+/// Get a presigned url to picture of a user using the api
 #[utoipa::path(tag = "api", params(GetQuery))]
 #[get("/{kthid}")]
 async fn get(
@@ -154,11 +154,8 @@ async fn get(
         return Err(Error::Unauthorized);
     }
 
-    let (bytes, mime_type) = s3
-        .get_image(&kthid.to_string(), query.quality.unwrap_or(false))
-        .await?;
-
-    Ok(HttpResponse::Ok().content_type(mime_type).body(bytes))
+    Ok(HttpResponse::Ok()
+        .body(s3.get_presigned_image(&kthid.to_string(), query.quality.unwrap_or(false)).await?))
 }
 
 /// Upload a picture using the api

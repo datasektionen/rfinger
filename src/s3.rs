@@ -1,11 +1,25 @@
-use std::{env, fmt::Display, io::{Cursor, Read}};
+use std::{
+    env,
+    fmt::Display,
+    io::{Cursor, Read},
+    time::Duration,
+};
 
 use actix_multipart::form::tempfile::TempFile;
 use actix_web::web::Bytes;
 use aws_config::{BehaviorVersion, Region};
-use aws_sdk_s3::{error::SdkError, operation::{get_object::{GetObjectError, GetObjectOutput}, put_object::{PutObjectError, PutObjectOutput}}, primitives::ByteStream};
+use aws_sdk_s3::{
+    error::SdkError,
+    operation::{
+        get_object::{GetObjectError, GetObjectOutput},
+        put_object::{PutObjectError, PutObjectOutput},
+    },
+    presigning::{PresignedRequest, PresigningConfig},
+    primitives::ByteStream,
+};
 use aws_smithy_runtime_api::http::Response;
-use image::{imageops::FilterType, ImageFormat, ImageReader};
+use image::{ImageFormat, ImageReader, imageops::FilterType};
+use reqwest::header::CONTENT_TYPE;
 use webp::{Encoder, WebPMemory};
 
 use crate::error::Error;
@@ -56,7 +70,6 @@ impl Display for PathType {
     }
 }
 
-
 /// A s3 bucket client with custom functions
 pub struct Client {
     s3_client: aws_sdk_s3::Client,
@@ -94,77 +107,59 @@ impl Client {
             key = PathType::Compressed(kthid.to_string());
 
             if let Ok(image) = self.get_object(&key.to_string()).await {
-                let image_bytes = image.body.collect().await?.into_bytes();
-                let mime_type = image
-                    .content_type
-                    .clone()
-                    .ok_or(Error::InternalServerError(String::from(
-                        "image has no mime type",
-                    )))?;
-                return Ok((image_bytes, mime_type));
+                return Ok(Client::parse_get_object(image).await?);
             }
         }
 
         key = PathType::Personal(kthid.to_string());
 
-        // If compressed not found or high quality requested check if a uploaded picture exists
-        if let Ok(image) = self.get_object(&key.to_string()).await {
-            let image_bytes = image.body.collect().await?.into_bytes();
-            let mime_type = image
-                .content_type
-                .clone()
-                .ok_or(Error::InternalServerError(String::from(
-                    "image has no mime type",
-                )))?;
-
-            // If profile sized picture was requested but not found, create it
-            if !quality {
-                let compressed = process_image(image_bytes.to_vec(), &mime_type)?;
-                self.put_object(
-                    PathType::Compressed(kthid.to_string()),
-                    compressed.clone(),
-                    "image/webp",
-                )
-                .await?;
-
-                return Ok((Bytes::from(compressed), String::from("image/webp")));
-            } else {
-                return Ok((image_bytes, mime_type));
-            }
+        if let Some(url) = self.get_quality_image(kthid, key, quality).await? {
+            return Ok(url);
         }
 
         key = PathType::Original(kthid.to_string());
 
-        // If uploaded picture wasnt found try to get nolle picture
-        if let Ok(image) = self.get_object(&key.to_string()).await {
-            let image_bytes = image.body.collect().await?.into_bytes();
-            let mime_type = image
-                .content_type
-                .clone()
-                .ok_or(Error::InternalServerError(String::from(
-                    "image has no mime type",
-                )))?;
-
-            // If profile sized picture was requested but not found, create it
-            if !quality {
-                let compressed = process_image(image_bytes.to_vec(), &mime_type)?;
-                self.put_object(
-                    PathType::Compressed(kthid.to_string()),
-                    compressed.clone(),
-                    "image/webp",
-                )
-                .await?;
-
-                return Ok((Bytes::from(compressed), mime_type));
-            } else {
-                return Ok((image_bytes, mime_type));
-            }
+        if let Some(url) = self.get_quality_image(kthid, key, quality).await? {
+            return Ok(url);
         }
 
         key = PathType::Missing;
 
         // If no picture was found, return default
         let image = self.get_object(&key.to_string()).await?;
+        let (image_bytes, mime_type) = Client::parse_get_object(image).await?;
+        Ok((image_bytes, mime_type))
+    }
+
+    async fn get_quality_image(
+        &self,
+        kthid: &str,
+        key: PathType,
+        quality: bool,
+    ) -> Result<Option<(Bytes, String)>, Error> {
+        if let Ok(image) = self.get_object(&key.to_string()).await {
+            let (image_bytes, mime_type) = Client::parse_get_object(image).await?;
+
+            // If profile sized picture was requested but not found, create it
+            if !quality {
+                let compressed = process_image(image_bytes.to_vec(), &mime_type)?;
+                self.put_object(
+                    PathType::Compressed(kthid.to_string()),
+                    compressed.clone(),
+                    "image/webp",
+                )
+                .await?;
+
+                return Ok(Some((Bytes::from(compressed), mime_type)));
+            } else {
+                return Ok(Some((image_bytes, mime_type)));
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn parse_get_object(image: GetObjectOutput) -> Result<(Bytes, String), Error> {
         let image_bytes = image.body.collect().await?.into_bytes();
         let mime_type = image
             .content_type
@@ -172,6 +167,7 @@ impl Client {
             .ok_or(Error::InternalServerError(String::from(
                 "image has no mime type",
             )))?;
+
         Ok((image_bytes, mime_type))
     }
 
@@ -185,6 +181,101 @@ impl Client {
             .bucket(env::var("S3_BUCKET").expect("bucket name env"))
             .key(key.to_string())
             .send()
+            .await
+    }
+
+    /// Get a prisigned url to an image from s3
+    ///
+    /// Priority: compressed > personal > original > missing
+    ///
+    /// if high quality was requested ignore compressed
+    pub async fn get_presigned_image(&self, kthid: &str, quality: bool) -> Result<String, Error> {
+        let mut key;
+
+        // If profile picture requested try to get compressed
+        if !quality {
+            key = PathType::Compressed(kthid.to_string());
+
+            if let Ok(presigned) = self.get_presigned(&key.to_string()).await {
+                return Ok(presigned.uri().to_string());
+            }
+        }
+
+        key = PathType::Personal(kthid.to_string());
+
+        if let Some(url) = self.get_quality_presigned(kthid, key, quality).await? {
+            return Ok(url);
+        }
+
+        key = PathType::Original(kthid.to_string());
+
+        if let Some(url) = self.get_quality_presigned(kthid, key, quality).await? {
+            return Ok(url);
+        }
+
+        key = PathType::Missing;
+
+        // If no picture was found, return default
+        Ok(self
+            .get_presigned(&key.to_string())
+            .await?
+            .uri()
+            .to_string())
+    }
+
+    /// Helper function for getting things from s3 easier
+    async fn get_quality_presigned(
+        &self,
+        key: &str,
+        path: PathType,
+        quality: bool,
+    ) -> Result<Option<String>, Error> {
+        if let Ok(presigned) = self.get_presigned(&path.to_string()).await {
+            // If profile sized picture was requested but not found, create it
+            if !quality {
+                let res = reqwest::get(presigned.uri()).await?;
+                let mime_type = res
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .ok_or(Error::InternalServerError(String::from(
+                        "no mime_type in s3",
+                    )))?
+                    .to_str()?
+                    .to_string();
+                let image_bytes = res.bytes().await?;
+                let compressed = process_image(image_bytes.to_vec(), &mime_type)?;
+                self.put_object(
+                    PathType::Compressed(key.to_string()),
+                    compressed.clone(),
+                    "image/webp",
+                )
+                .await?;
+
+                return Ok(Some(
+                    self.get_presigned(&key.to_string())
+                        .await?
+                        .uri()
+                        .to_string(),
+                ));
+            } else {
+                return Ok(Some(presigned.uri().to_string()));
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_presigned(
+        &self,
+        key: &str,
+    ) -> Result<PresignedRequest, SdkError<GetObjectError, Response>> {
+        let config = PresigningConfig::expires_in(Duration::from_secs(12 * 3600)).unwrap();
+
+        self.s3_client
+            .get_object()
+            .bucket(env::var("S3_BUCKET").expect("bucket name env"))
+            .key(key.to_string())
+            .presigned(config)
             .await
     }
 
