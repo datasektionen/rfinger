@@ -253,7 +253,7 @@ impl Client {
                 .await?;
 
                 return Ok(Some(
-                    self.get_presigned(&key.to_string())
+                    self.get_presigned(&PathType::Compressed(key.to_string()).to_string())
                         .await?
                         .uri()
                         .to_string(),
