@@ -81,7 +81,7 @@ pub struct Client {
 }
 
 pub struct LinkCache {
-    link: PresignedRequest,
+    link: String,
     ttl: DateTime<Utc>,
 }
 
@@ -209,21 +209,36 @@ impl Client {
         if !quality {
             key = PathType::Compressed(kthid.to_string());
 
-            if let Ok(presigned) = self.get_presigned(&key.to_string()).await {
-                return Ok(presigned.uri().to_string());
+            let result = self.get_presigned(&key.to_string()).await;
+
+            if let Ok(Some(presigned)) = result {
+                log::info!("{presigned}");
+                return Ok(presigned);
+            } else {
+                log::error!("{result:?}");
             }
         }
 
         key = PathType::Personal(kthid.to_string());
 
-        if let Some(url) = self.get_quality_presigned(kthid, key, quality).await? {
+        let result = self.get_quality_presigned(kthid, key, quality).await;
+
+        if let Ok(Some(url)) = result {
+            log::info!("{url}");
             return Ok(url);
+        } else {
+            log::error!("{result:?}");
         }
 
         key = PathType::Original(kthid.to_string());
 
-        if let Some(url) = self.get_quality_presigned(kthid, key, quality).await? {
+        let result = self.get_quality_presigned(kthid, key, quality).await;
+
+        if let Ok(Some(url)) = result {
+            log::info!("{url}");
             return Ok(url);
+        } else {
+            log::error!("{result:?}");
         }
 
         key = PathType::Missing;
@@ -232,8 +247,7 @@ impl Client {
         Ok(self
             .get_presigned(&key.to_string())
             .await?
-            .uri()
-            .to_string())
+            .expect("missing.svg to always exist"))
     }
 
     /// Helper function for getting things from s3 easier
@@ -243,10 +257,10 @@ impl Client {
         path: PathType,
         quality: bool,
     ) -> Result<Option<String>, Error> {
-        if let Ok(presigned) = self.get_presigned(&path.to_string()).await {
+        if let Some(presigned) = self.get_presigned(&path.to_string()).await? {
             // If profile sized picture was requested but not found, create it
             if !quality {
-                let res = reqwest::get(presigned.uri()).await?;
+                let res = reqwest::get(presigned).await?;
                 let mime_type = res
                     .headers()
                     .get(CONTENT_TYPE)
@@ -264,14 +278,11 @@ impl Client {
                 )
                 .await?;
 
-                return Ok(Some(
-                    self.get_presigned(&PathType::Compressed(key.to_string()).to_string())
-                        .await?
-                        .uri()
-                        .to_string(),
-                ));
+                return Ok(self
+                    .get_presigned(&PathType::Compressed(key.to_string()).to_string())
+                    .await?);
             } else {
-                return Ok(Some(presigned.uri().to_string()));
+                return Ok(Some(presigned));
             }
         } else {
             Ok(None)
@@ -281,24 +292,25 @@ impl Client {
     async fn get_presigned(
         &self,
         key: &str,
-    ) -> Result<PresignedRequest, SdkError<GetObjectError, Response>> {
+    ) -> Result<Option<String>, SdkError<GetObjectError, Response>> {
         if let Ok(lock) = self.cache.lock()
             && let Some(cache) = lock.get(key)
             && cache.ttl > chrono::offset::Local::now()
         {
-            return Ok(cache.link.clone());
+            log::info!("cache hit: {}", key);
+            return Ok(Some(cache.link.clone()));
         }
-        if let Err(err) = self
+
+        if self
             .s3_client
             .head_object()
             .bucket(env::var("S3_BUCKET").expect("bucket name env"))
             .key(key.to_string())
             .send()
             .await
+            .is_err()
         {
-            return Err(
-                err.map_service_error(|_| GetObjectError::NoSuchKey(NoSuchKey::builder().build()))
-            );
+            return Ok(None);
         }
 
         let config = PresigningConfig::expires_in(Duration::from_secs(12 * 3600)).unwrap();
@@ -315,13 +327,14 @@ impl Client {
             lock.insert(
                 key.to_string(),
                 LinkCache {
-                    link: link.clone(),
+                    link: link.uri().to_string(),
                     ttl: chrono::offset::Utc::now() + Duration::from_secs(8 * 3600),
                 },
             );
+            log::info!("insert {} into cache", key);
         }
 
-        Ok(link)
+        Ok(Some(link.uri().to_string()))
     }
 
     /// Upload an image to s3

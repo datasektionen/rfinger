@@ -87,7 +87,7 @@ async fn main() -> std::io::Result<()> {
 /// Set up routes for the api part of rfinger (https://rfinger.datasektionen.se/api)
 fn config_api() -> impl FnOnce(&mut ServiceConfig) {
     |cfg: &mut ServiceConfig| {
-        cfg.service(get).service(upload).service(nollan);
+        cfg.service(get_batch).service(get).service(upload).service(nollan);
     }
 }
 
@@ -163,6 +163,35 @@ async fn get(
         s3.get_presigned_image(&kthid.to_string(), query.quality.unwrap_or(false))
             .await?,
     ))
+}
+
+/// Get presigned urls for every user in a list
+#[utoipa::path(tag = "api", params(GetQuery), request_body = Vec<String>)]
+#[get("/batch")]
+async fn get_batch(
+    s3: web::Data<Client>,
+    body: String,
+    query: web::Query<GetQuery>,
+    cache: web::Data<Mutex<HashMap<String, DateTime<Utc>>>>,
+    auth: BearerAuth,
+) -> Result<HttpResponse, Error> {
+    if !check_token(auth.token(), "get", &cache).await? {
+        return Err(Error::Unauthorized);
+    }
+
+    let kthids: Vec<String> = serde_json::from_str(&body)?;
+
+    let mut response: HashMap<String, String> = HashMap::new();
+
+    for kthid in kthids {
+        response.insert(
+            kthid.clone(),
+            s3.get_presigned_image(&kthid.to_string(), query.quality.unwrap_or(false))
+                .await?,
+        );
+    }
+
+    Ok(HttpResponse::Ok().json(response))
 }
 
 /// Upload a picture using the api
