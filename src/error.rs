@@ -134,7 +134,7 @@ impl From<aws_sdk_s3::error::SdkError<GetObjectError, aws_smithy_runtime_api::ht
         value: aws_sdk_s3::error::SdkError<GetObjectError, aws_smithy_runtime_api::http::Response>,
     ) -> Self {
         Error::InternalServerError(format!(
-            "failed to put object in s3: {}",
+            "failed to get object in s3: {}",
             DisplayErrorContext(value)
         ))
     }
