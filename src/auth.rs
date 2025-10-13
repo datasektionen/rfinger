@@ -4,6 +4,7 @@ use actix_web::{
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
     get, web,
 };
+use chrono::{DateTime, Utc};
 use jsonwebtoken::get_current_timestamp;
 use openidconnect::{
     AccessTokenHash, AuthorizationCode, CsrfToken, EmptyAdditionalClaims, IdToken, IdTokenClaims,
@@ -14,8 +15,11 @@ use openidconnect::{
 };
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     env,
     future::{Ready, ready},
+    sync::Mutex,
+    time::Duration,
 };
 use types::{
     AuthMiddleware, AuthTokenResponse, InnerAuthMiddleware, LocalBoxFuture, OIDCData, Token,
@@ -129,7 +133,20 @@ fn check_token_hash(
     Ok(())
 }
 
-pub(crate) async fn check_token(token: &str, perm: &str) -> Result<bool, Error> {
+pub(crate) async fn check_token(
+    token: &str,
+    perm: &str,
+    cache: &Mutex<HashMap<String, DateTime<Utc>>>,
+) -> Result<bool, Error> {
+    // Only cache tokens with get permission
+    if perm == "get"
+        && let Ok(lock) = cache.lock()
+        && let Some(ttl) = lock.get(token)
+        && *ttl > Utc::now()
+    {
+        return Ok(true);
+    }
+
     let client = reqwest::Client::new();
     let response = client
         .get(format!(
@@ -144,7 +161,16 @@ pub(crate) async fn check_token(token: &str, perm: &str) -> Result<bool, Error> 
         .text()
         .await?;
 
-    Ok(serde_json::from_str::<bool>(&response).unwrap_or(false))
+    if serde_json::from_str::<bool>(&response).unwrap_or(false) {
+        if perm == "get"
+            && let Ok(mut lock) = cache.lock()
+        {
+            lock.insert(String::from(token), Utc::now() + Duration::from_secs(60));
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 impl<S, B> Transform<S, ServiceRequest> for AuthMiddleware

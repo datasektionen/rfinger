@@ -5,12 +5,13 @@ use actix_web::{
     App, HttpResponse, HttpServer, get,
     middleware::Logger,
     post,
-    web::{self, Redirect},
+    web::{self, Data, Redirect},
 };
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use auth::types::{AuthMiddleware, OIDCData};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use std::env;
+use std::{collections::HashMap, env, sync::Mutex};
 use utoipa::{IntoParams, OpenApi};
 use utoipa_actix_web::AppExt;
 use utoipa_actix_web::service_config::ServiceConfig;
@@ -42,6 +43,8 @@ async fn main() -> std::io::Result<()> {
     let client = web::Data::new(Client::new().await);
     let (oidc, auth_url) = OIDCData::get_oidc().await;
     let oidc = web::Data::new(oidc);
+    let token_cache: Data<Mutex<HashMap<String, DateTime<Utc>>>> =
+        web::Data::new(Mutex::new(HashMap::new()));
 
     HttpServer::new(move || {
         let cors = Cors::permissive();
@@ -53,6 +56,7 @@ async fn main() -> std::io::Result<()> {
                     .wrap(cors)
                     .app_data(client.clone())
                     .app_data(oidc.clone())
+                    .app_data(token_cache.clone())
             })
             .service(utoipa_actix_web::scope("/auth").configure(auth::config()))
             .service(utoipa_actix_web::scope("/api").configure(config_api()))
@@ -148,14 +152,17 @@ async fn get(
     s3: web::Data<Client>,
     kthid: web::Path<String>,
     query: web::Query<GetQuery>,
+    cache: web::Data<Mutex<HashMap<String, DateTime<Utc>>>>,
     auth: BearerAuth,
 ) -> Result<HttpResponse, Error> {
-    if !check_token(auth.token(), "get").await? {
+    if !check_token(auth.token(), "get", &cache).await? {
         return Err(Error::Unauthorized);
     }
 
-    Ok(HttpResponse::Ok()
-        .body(s3.get_presigned_image(&kthid.to_string(), query.quality.unwrap_or(false)).await?))
+    Ok(HttpResponse::Ok().body(
+        s3.get_presigned_image(&kthid.to_string(), query.quality.unwrap_or(false))
+            .await?,
+    ))
 }
 
 /// Upload a picture using the api
@@ -164,10 +171,11 @@ async fn get(
 async fn upload(
     s3: web::Data<Client>,
     kthid: web::Path<String>,
+    cache: web::Data<Mutex<HashMap<String, DateTime<Utc>>>>,
     auth: BearerAuth,
     MultipartForm(form): MultipartForm<UploadForm>,
 ) -> Result<HttpResponse, Error> {
-    if !check_token(auth.token(), "upload").await? {
+    if !check_token(auth.token(), "upload", &cache).await? {
         return Err(Error::Unauthorized);
     }
 
@@ -192,10 +200,11 @@ async fn upload(
 async fn nollan(
     s3: web::Data<Client>,
     kthid: web::Path<String>,
+    cache: web::Data<Mutex<HashMap<String, DateTime<Utc>>>>,
     auth: BearerAuth,
     MultipartForm(form): MultipartForm<UploadForm>,
 ) -> Result<HttpResponse, Error> {
-    if !check_token(auth.token(), "nollan").await? {
+    if !check_token(auth.token(), "nollan", &cache).await? {
         return Err(Error::Unauthorized);
     }
 

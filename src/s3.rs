@@ -1,8 +1,10 @@
 use std::{
+    collections::HashMap,
     env,
     fmt::Display,
     io::{Cursor, Read},
-    time::Duration,
+    sync::Mutex,
+    time::{Duration, SystemTime},
 };
 
 use actix_multipart::form::tempfile::TempFile;
@@ -19,6 +21,7 @@ use aws_sdk_s3::{
     types::error::{InvalidObjectState, NoSuchKey},
 };
 use aws_smithy_runtime_api::http::Response;
+use chrono::{DateTime, Utc};
 use image::{ImageFormat, ImageReader, imageops::FilterType};
 use reqwest::header::CONTENT_TYPE;
 use webp::{Encoder, WebPMemory};
@@ -74,6 +77,12 @@ impl Display for PathType {
 /// A s3 bucket client with custom functions
 pub struct Client {
     s3_client: aws_sdk_s3::Client,
+    cache: Mutex<HashMap<String, LinkCache>>,
+}
+
+pub struct LinkCache {
+    link: PresignedRequest,
+    ttl: DateTime<Utc>,
 }
 
 impl Client {
@@ -92,7 +101,10 @@ impl Client {
             .build();
         let client = aws_sdk_s3::Client::from_conf(config);
 
-        Client { s3_client: client }
+        Client {
+            s3_client: client,
+            cache: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Get a picture from s3
@@ -270,6 +282,12 @@ impl Client {
         &self,
         key: &str,
     ) -> Result<PresignedRequest, SdkError<GetObjectError, Response>> {
+        if let Ok(lock) = self.cache.lock()
+            && let Some(cache) = lock.get(key)
+            && cache.ttl > chrono::offset::Local::now()
+        {
+            return Ok(cache.link.clone());
+        }
         if let Err(err) = self
             .s3_client
             .head_object()
@@ -285,12 +303,25 @@ impl Client {
 
         let config = PresigningConfig::expires_in(Duration::from_secs(12 * 3600)).unwrap();
 
-        self.s3_client
+        let link = self
+            .s3_client
             .get_object()
             .bucket(env::var("S3_BUCKET").expect("bucket name env"))
             .key(key.to_string())
             .presigned(config)
-            .await
+            .await?;
+
+        if let Ok(mut lock) = self.cache.lock() {
+            lock.insert(
+                key.to_string(),
+                LinkCache {
+                    link: link.clone(),
+                    ttl: chrono::offset::Utc::now() + Duration::from_secs(8 * 3600),
+                },
+            );
+        }
+
+        Ok(link)
     }
 
     /// Upload an image to s3
