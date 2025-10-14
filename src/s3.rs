@@ -212,10 +212,7 @@ impl Client {
             let result = self.get_presigned(&key.to_string()).await;
 
             if let Ok(Some(presigned)) = result {
-                log::info!("{presigned}");
                 return Ok(presigned);
-            } else {
-                log::error!("{result:?}");
             }
         }
 
@@ -224,10 +221,7 @@ impl Client {
         let result = self.get_quality_presigned(kthid, key, quality).await;
 
         if let Ok(Some(url)) = result {
-            log::info!("{url}");
             return Ok(url);
-        } else {
-            log::error!("{result:?}");
         }
 
         key = PathType::Original(kthid.to_string());
@@ -235,10 +229,7 @@ impl Client {
         let result = self.get_quality_presigned(kthid, key, quality).await;
 
         if let Ok(Some(url)) = result {
-            log::info!("{url}");
             return Ok(url);
-        } else {
-            log::error!("{result:?}");
         }
 
         key = PathType::Missing;
