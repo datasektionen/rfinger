@@ -5,22 +5,34 @@ services:
     ports:
       - 8080:8080
     environment:
-      - RUST_LOG=debug
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - S3_BUCKET=rfinger
+      - RUST_LOG=debug,aws_smithy_runtime_api=info,aws_smithy_runtime=info,tracing=info,aws_runtime=info
+      - AWS_ACCESS_KEY_ID=aws-id
+      - AWS_SECRET_ACCESS_KEY=aws-secret
+      - S3_BUCKET=zfinger
       - OIDC_ID=client-id
       - OIDC_SECRET=client-secret
-      - OIDC_PROVIDER=http://nyckeln:7003
+      - OIDC_PROVIDER=http://localhost:7003
       - REDIRECT_URL=http://localhost:8080/auth/oidc/callback
-      - APP_SECRET=<insert app secret>
-      - HIVE_URL=https://hive.datasektionen.se/api/v1
-      - HIVE_SECRET=<insert hive api secret>
-
-  s3mock:
+      - APP_SECRET=app-secret
+      - HIVE_URL=http://nyckeln:7004/api/v1
+      - HIVE_SECRET=hive-secret
+      - PORT=8080
+    configs:
+      - source: nginx.conf
+        target: /etc/nginx/nginx.conf
+    develop:
+      watch:
+        - action: rebuild
+          path: ./index.html
+          target: /build/index.html
+        - action: rebuild
+          path: ./src/
+          target: /build/src/
+  s3:
     image: adobe/s3mock:latest
     environment:
-      - initialBuckets=rfinger
+      - COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS=zfinger
+      - COM_ADOBE_TESTING_S3MOCK_STORE_REGION=eu-west-1
     ports:
       - 9090:9090
   nyckeln:
@@ -29,31 +41,48 @@ services:
       - source: nyckeln.yaml
         target: /config.yaml
     ports:
-      - 7001:7001
-      - 7002:7002
       - 7003:7003
+      - 7004:7004
 
 configs:
+  nginx.conf:
+    content: |
+      events {}
+
+      http {
+        server {
+          listen 7003;
+
+          location / {
+            proxy_pass http://nyckeln:7003;
+          }
+        }
+      }
+
   nyckeln.yaml:
     content: |
       clients:
         - id: "client-id"
           secret: "client-secret"
           redirect_uris:
-            - "http://localhost:8080/auth/oidc/callback"
+            - http://localhost:8080/auth/oidc/callback
 
       users:
-        - kth_id: turetek
+        - ug_kth_id: some-id
+          kth_id: turetek
           email: turetek@kth.se
           first_name: Ture
           family_name: Teknolog
-          pls_permissions:
-            sso:
-              - fippel
-        - kth_id: viktoe
-          email: viktoe@kth.se
-          first_name: Viktor
-          family_name: Ekby
-          pls_permissions:
-            sso:
-              - fippel
+        - ug_kth_id: some-other-id
+          kth_id: diadat
+          email: diadat@kth.se
+          first_name: Diana
+          family_name: Datalog
+
+      hive:
+        tokens:
+          - secret: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa
+            permissions:
+              - id: get
+              - id: upload
+              - id: nollan

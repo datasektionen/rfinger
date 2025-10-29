@@ -87,18 +87,31 @@ pub struct LinkCache {
 
 impl Client {
     pub async fn new() -> Self {
-        // aws_config needs to be modified to allow local development
-        let config = aws_config::load_defaults(BehaviorVersion::latest())
-            .await
-            .into_builder()
-            // .endpoint_url("http://localhost:9090")
-            .region(Region::new("eu-west-1"))
-            .build();
+        let config = if cfg!(debug_assertions) {
+            // aws_config needs to be modified to allow local development
+            aws_config::load_defaults(BehaviorVersion::latest())
+                .await
+                .into_builder()
+                .endpoint_url("http://s3:9090")
+                .region(Region::new("eu-west-1"))
+                .build()
+        } else {
+            aws_config::load_defaults(BehaviorVersion::latest())
+                .await
+                .into_builder()
+                .region(Region::new("eu-west-1"))
+                .build()
+        };
 
-        // local s3 bucket emplators often only support path style queries
-        let config = aws_sdk_s3::config::Builder::from(&config)
-            // .force_path_style(true)
-            .build();
+        let config = if cfg!(debug_assertions) {
+            // local s3 bucket emplators often only support path style queries
+            aws_sdk_s3::config::Builder::from(&config)
+                .force_path_style(true)
+                .build()
+        } else {
+            aws_sdk_s3::config::Builder::from(&config).build()
+        };
+
         let client = aws_sdk_s3::Client::from_conf(config);
 
         Client {
