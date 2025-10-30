@@ -167,7 +167,7 @@ async fn get(
 
 /// Get presigned urls for every user in a list
 #[utoipa::path(tag = "api", params(GetQuery), request_body = Vec<String>)]
-#[get("/batch")]
+#[post("/batch")]
 async fn get_batch(
     s3: web::Data<Client>,
     body: String,
