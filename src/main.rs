@@ -5,11 +5,13 @@ use actix_web::{
     App, HttpResponse, HttpServer, get,
     middleware::Logger,
     post,
+    rt::{spawn, task::JoinHandle},
     web::{self, Data, Redirect},
 };
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use auth::types::{AuthMiddleware, OIDCData};
 use chrono::{DateTime, Utc};
+use futures_util::future;
 use serde::Deserialize;
 use std::{collections::HashMap, env, sync::Mutex};
 use utoipa::{IntoParams, OpenApi};
@@ -87,7 +89,10 @@ async fn main() -> std::io::Result<()> {
 /// Set up routes for the api part of rfinger (https://rfinger.datasektionen.se/api)
 fn config_api() -> impl FnOnce(&mut ServiceConfig) {
     |cfg: &mut ServiceConfig| {
-        cfg.service(get_batch).service(get).service(upload).service(nollan);
+        cfg.service(get_batch)
+            .service(get)
+            .service(upload)
+            .service(nollan);
     }
 }
 
@@ -181,17 +186,28 @@ async fn get_batch(
 
     let kthids: Vec<String> = serde_json::from_str(&body)?;
 
-    let mut response: HashMap<String, String> = HashMap::new();
+    let quality = query.quality.unwrap_or(false);
 
-    for kthid in kthids {
-        response.insert(
-            kthid.clone(),
-            s3.get_presigned_image(&kthid.to_string(), query.quality.unwrap_or(false))
-                .await?,
-        );
-    }
+    let handles = kthids
+        .into_iter()
+        .map(|kthid| {
+            let client = s3.clone();
+            spawn(async move {
+                client
+                    .get_presigned_image(&kthid, quality)
+                    .await
+                    .map(|link| (kthid, link))
+            })
+        })
+        .collect::<Vec<JoinHandle<Result<(String, String), Error>>>>();
 
-    Ok(HttpResponse::Ok().json(response))
+    let response: Result<HashMap<String, String>, Error> = future::try_join_all(handles)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    Ok(HttpResponse::Ok().json(response?))
 }
 
 /// Upload a picture using the api

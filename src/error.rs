@@ -1,9 +1,6 @@
-use std::{
-    env::VarError,
-    fmt::{Display, Formatter},
-};
+use std::env::VarError;
 
-use actix_web::{HttpResponse, ResponseError, http::StatusCode};
+use actix_web::{http::StatusCode, HttpResponse, ResponseError};
 use aws_sdk_s3::{
     error::DisplayErrorContext,
     operation::{get_object::GetObjectError, put_object::PutObjectError},
@@ -11,9 +8,9 @@ use aws_sdk_s3::{
 use derive_more::Display;
 use image::ImageError;
 use openidconnect::{
-    ClaimsVerificationError, ConfigurationError, HttpClientError, RequestTokenError,
-    SignatureVerificationError, SigningError, StandardErrorResponse, core::CoreErrorResponseType,
-    reqwest,
+    core::CoreErrorResponseType, reqwest, ClaimsVerificationError, ConfigurationError,
+    HttpClientError, RequestTokenError, SignatureVerificationError, SigningError,
+    StandardErrorResponse,
 };
 use reqwest::header::ToStrError;
 

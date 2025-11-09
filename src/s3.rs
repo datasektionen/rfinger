@@ -1,10 +1,8 @@
 use std::{
-    collections::HashMap,
     env,
     fmt::Display,
     io::{Cursor, Read},
-    sync::Mutex,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use actix_multipart::form::tempfile::TempFile;
@@ -16,13 +14,12 @@ use aws_sdk_s3::{
         get_object::{GetObjectError, GetObjectOutput},
         put_object::{PutObjectError, PutObjectOutput},
     },
-    presigning::{PresignedRequest, PresigningConfig},
+    presigning::PresigningConfig,
     primitives::ByteStream,
-    types::error::{InvalidObjectState, NoSuchKey},
 };
 use aws_smithy_runtime_api::http::Response;
-use chrono::{DateTime, Utc};
 use image::{ImageFormat, ImageReader, imageops::FilterType};
+use moka::sync::Cache;
 use reqwest::header::CONTENT_TYPE;
 use webp::{Encoder, WebPMemory};
 
@@ -77,12 +74,11 @@ impl Display for PathType {
 /// A s3 bucket client with custom functions
 pub struct Client {
     s3_client: aws_sdk_s3::Client,
-    cache: Mutex<HashMap<String, LinkCache>>,
-}
-
-pub struct LinkCache {
-    link: String,
-    ttl: DateTime<Utc>,
+    // Caching a presigned link to a specific user
+    // The an entry only needs to be manualy invalidated if the user goes from having no picture to
+    // a picture or from original to personal
+    compressed_cache: Cache<String, String>,
+    quality_cache: Cache<String, String>,
 }
 
 impl Client {
@@ -114,9 +110,19 @@ impl Client {
 
         let client = aws_sdk_s3::Client::from_conf(config);
 
+        let compressed_cache = Cache::builder()
+            .max_capacity(1000)
+            .time_to_live(Duration::from_secs(5 * 24 * 3600))
+            .build();
+        let quality_cache = Cache::builder()
+            .max_capacity(1000)
+            .time_to_live(Duration::from_secs(5 * 24 * 3600))
+            .build();
+
         Client {
             s3_client: client,
-            cache: Mutex::new(HashMap::new()),
+            compressed_cache,
+            quality_cache,
         }
     }
 
@@ -216,6 +222,12 @@ impl Client {
     ///
     /// if high quality was requested ignore compressed
     pub async fn get_presigned_image(&self, kthid: &str, quality: bool) -> Result<String, Error> {
+        if !quality && let Some(presigned) = self.compressed_cache.get(kthid) {
+            return Ok(presigned);
+        } else if quality && let Some(presigned) = self.quality_cache.get(kthid) {
+            return Ok(presigned);
+        }
+
         let mut key;
 
         // If profile picture requested try to get compressed
@@ -225,6 +237,8 @@ impl Client {
             let result = self.get_presigned(&key.to_string()).await;
 
             if let Ok(Some(presigned)) = result {
+                self.compressed_cache
+                    .insert(kthid.to_string(), presigned.clone());
                 return Ok(presigned);
             }
         }
@@ -234,6 +248,7 @@ impl Client {
         let result = self.get_quality_presigned(kthid, key, quality).await;
 
         if let Ok(Some(url)) = result {
+            self.quality_cache.insert(kthid.to_string(), url.clone());
             return Ok(url);
         }
 
@@ -242,16 +257,24 @@ impl Client {
         let result = self.get_quality_presigned(kthid, key, quality).await;
 
         if let Ok(Some(url)) = result {
+            self.quality_cache.insert(kthid.to_string(), url.clone());
             return Ok(url);
         }
 
         key = PathType::Missing;
 
         // If no picture was found, return default
-        Ok(self
+        let presigned = self
             .get_presigned(&key.to_string())
             .await?
-            .expect("missing.svg to always exist"))
+            .expect("missing.svg to always exist");
+
+        self.compressed_cache
+            .insert(kthid.to_string(), presigned.clone());
+        self.quality_cache
+            .insert(kthid.to_string(), presigned.clone());
+
+        Ok(presigned)
     }
 
     /// Helper function for getting things from s3 easier
@@ -297,14 +320,6 @@ impl Client {
         &self,
         key: &str,
     ) -> Result<Option<String>, SdkError<GetObjectError, Response>> {
-        if let Ok(lock) = self.cache.lock()
-            && let Some(cache) = lock.get(key)
-            && cache.ttl > chrono::offset::Local::now()
-        {
-            log::info!("cache hit: {}", key);
-            return Ok(Some(cache.link.clone()));
-        }
-
         if self
             .s3_client
             .head_object()
@@ -317,7 +332,7 @@ impl Client {
             return Ok(None);
         }
 
-        let config = PresigningConfig::expires_in(Duration::from_secs(12 * 3600)).unwrap();
+        let config = PresigningConfig::expires_in(Duration::from_secs(7 * 24 * 3600)).unwrap();
 
         let link = self
             .s3_client
@@ -326,17 +341,6 @@ impl Client {
             .key(key.to_string())
             .presigned(config)
             .await?;
-
-        if let Ok(mut lock) = self.cache.lock() {
-            lock.insert(
-                key.to_string(),
-                LinkCache {
-                    link: link.uri().to_string(),
-                    ttl: chrono::offset::Utc::now() + Duration::from_secs(8 * 3600),
-                },
-            );
-            log::info!("insert {} into cache", key);
-        }
 
         Ok(Some(link.uri().to_string()))
     }
@@ -350,19 +354,23 @@ impl Client {
         kthid: &str,
         image_bytes: Vec<u8>,
         mime_type: &str,
-    ) -> Result<PutObjectOutput, Error> {
+    ) -> Result<(), Error> {
         self.put_object(path, image_bytes.clone(), &mime_type)
             .await?;
 
         let image_bytes = process_image(image_bytes, mime_type)?;
 
-        Ok(self
-            .put_object(
-                PathType::Compressed(kthid.to_string()),
-                image_bytes,
-                "image/webp",
-            )
-            .await?)
+        self.put_object(
+            PathType::Compressed(kthid.to_string()),
+            image_bytes,
+            "image/webp",
+        )
+        .await?;
+
+        self.compressed_cache.invalidate(kthid);
+        self.quality_cache.invalidate(kthid);
+
+        Ok(())
     }
 
     /// Helper function to make putting things in s3 easier
