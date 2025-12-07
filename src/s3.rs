@@ -355,6 +355,11 @@ impl Client {
         image_bytes: Vec<u8>,
         mime_type: &str,
     ) -> Result<(), Error> {
+        // Validate mime type before uploading
+        ImageFormat::from_mime_type(mime_type).ok_or(Error::InternalServerError(format!(
+            "incorrect mime type: {mime_type}"
+        )))?;
+
         self.put_object(path, image_bytes.clone(), &mime_type)
             .await?;
 
