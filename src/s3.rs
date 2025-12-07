@@ -404,7 +404,7 @@ pub fn get_bytes(image: &TempFile) -> Result<Vec<u8>, std::io::Error> {
 /// Convert any image to a 480x480 webp encoded image
 fn process_image(image_bytes: Vec<u8>, mime_type: &str) -> Result<Vec<u8>, Error> {
     let img_format = ImageFormat::from_mime_type(mime_type).ok_or(Error::InternalServerError(
-        String::from("incorrect mime type: {mime_type}"),
+        format!("incorrect mime type: {mime_type}"),
     ))?;
 
     let image = ImageReader::with_format(Cursor::new(image_bytes), img_format).decode()?;
