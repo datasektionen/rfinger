@@ -2,10 +2,11 @@ use std::{
     env,
     fmt::Display,
     fs::File,
-    io::{Cursor, Read, Seek, SeekFrom},
+    io::{BufReader, Cursor, Read, Seek, SeekFrom},
     time::Duration,
 };
 
+use exif::{In, Reader, Tag};
 use futures_util::lock::Mutex;
 
 use actix_multipart::form::tempfile::TempFile;
@@ -21,7 +22,9 @@ use aws_sdk_s3::{
     primitives::ByteStream,
 };
 use aws_smithy_runtime_api::http::Response;
-use image::{ImageFormat, ImageReader, imageops::FilterType};
+use image::{
+    ImageDecoder, ImageFormat, ImageReader, Limits, imageops::FilterType, metadata::Orientation,
+};
 use moka::sync::Cache;
 use webp::{Encoder, WebPMemory};
 
@@ -437,9 +440,14 @@ async fn process_image(
     log::debug!("Decode image");
 
     let image = match image {
-        Either::Left(image) => ImageReader::open(&image.file)?
-            .with_guessed_format()?
-            .decode()?,
+        Either::Left(image) => {
+            let orientation = get_orientation(image.file.as_file());
+            let mut image = ImageReader::open(&image.file)?
+                .with_guessed_format()?
+                .decode()?;
+            image.apply_orientation(orientation);
+            image
+        }
         Either::Right(image) => ImageReader::new(Cursor::new(image))
             .with_guessed_format()?
             .decode()?,
@@ -455,4 +463,14 @@ async fn process_image(
     let webp = encoder.encode(65f32);
 
     Ok(webp)
+}
+
+fn get_orientation(file: &File) -> Orientation {
+    let mut bufreader = BufReader::new(file);
+
+    let exif = Reader::new().read_from_container(&mut bufreader).unwrap();
+    let field = exif.get_field(Tag::Orientation, In::PRIMARY).unwrap();
+
+    Orientation::from_exif(field.value.get_uint(0).unwrap_or(1) as u8)
+        .unwrap_or(Orientation::NoTransforms)
 }
