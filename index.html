@@ -19,19 +19,35 @@
                 </section>
                 <section style="display: flex; flex-direction: column; align-items: center;">
                     <h2>Profilbild</h2>
-                    <div>
-                        <img src="/me" style="height: 200px; width: 200px; object-fit: cover; clip-path: circle(50%);" alt="Your profile picture" />
-                        <img src="/me" style="height: 100px; width: 100px; object-fit: cover; clip-path: circle(50%);" alt="Your profile picture" />
-                        <img src="/me" style="height: 50px; width: 50px; object-fit: cover; clip-path: circle(50%);" alt="Your profile picture" />
+                    <div style="display: flex; align-items: center">
+                        <div style="height: 200px; width: 200px; overflow: hidden">
+                            <img src="/me" style="height: 100%; width: 100%; object-fit: cover; object-position: top; clip-path: circle(50%);" alt="Your profile picture" />
+                        </div>
+                        <div style="height: 100px; width: 100px; overflow: hidden">
+                            <img src="/me" style="height: 100%; width: 100%; object-fit: cover; object-position: top; clip-path: circle(50%);" alt="Your profile picture" />
+                        </div>
+                        <div style="height: 50px; width: 50px; overflow: hidden">
+                            <img src="/me" style="height: 100%; width: 100%; object-fit: cover; object-position: top; clip-path: circle(50%);" alt="Your profile picture" />
+                        </div>
                     </div>
                 </section>
-                <form id="uploadForm" method="post" enctype="multipart/form-data" style="width: 50%;" action="/me">
+                <form id="uploadForm" method="post" enctype="multipart/form-data" style="width: 50%;" action="/me" onsubmit="return disableButton(this)">
                     <fieldset class="grid">
-                        <input type="file" name="image" value="profile picture" accept="image/*">
-                        <button type="submit" name="submit" value="Upload" id="uploadButton" onclick="this.setAttribute('aria-busy','true')">Upload</button>
+                        <input type="file" name="image" value="profile picture" accept="image/*" required>
+                        <button type="submit" name="submit" value="Upload" id="uploadButton">Ladda upp</button>
                     </fieldset>
                 </form>
             </article>
         </main>
     </body>
 </html>
+
+<script>
+    function disableButton(form) {
+        const button = form.querySelector('button[type="submit"]');
+        button.setAttribute('aria-busy','true');
+        button.disabled = true;
+        button.innerText = "Processar...";
+        return true; // allow form submission
+    }
+</script>
