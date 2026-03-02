@@ -22,7 +22,7 @@ use utoipa_redoc::{Redoc, Servable};
 use crate::{
     auth::check_token,
     error::Error,
-    s3::{Client, PathType, get_bytes},
+    s3::{Client, PathType},
 };
 
 mod auth;
@@ -47,6 +47,8 @@ async fn main() -> std::io::Result<()> {
     let oidc = web::Data::new(oidc);
     let token_cache: Data<Mutex<HashMap<String, DateTime<Utc>>>> =
         web::Data::new(Mutex::new(HashMap::new()));
+    // Mutex to make sure only one image is processed at once due to ram limitation
+    let processing_mutex = web::Data::new(futures_util::lock::Mutex::new(0));
 
     HttpServer::new(move || {
         let cors = Cors::permissive();
@@ -59,6 +61,7 @@ async fn main() -> std::io::Result<()> {
                     .app_data(client.clone())
                     .app_data(oidc.clone())
                     .app_data(token_cache.clone())
+                    .app_data(processing_mutex.clone())
             })
             .service(utoipa_actix_web::scope("/auth").configure(auth::config()))
             .service(utoipa_actix_web::scope("/api").configure(config_api()))
@@ -110,21 +113,24 @@ async fn index() -> actix_web::Result<NamedFile> {
 
 /// Upload a picture using the interactive website
 #[utoipa::path(tag = "interactive")]
-#[post("/")]
+#[post("")]
 async fn upload_interactive(
     s3: web::Data<Client>,
     kthid: web::ReqData<String>,
+    mutex: web::Data<futures_util::lock::Mutex<i32>>,
     MultipartForm(form): MultipartForm<UploadForm>,
 ) -> Result<Redirect, Error> {
     s3.put_image(
         PathType::Personal(kthid.to_string()),
         kthid.as_ref(),
-        get_bytes(&form.image)?,
+        &form.image,
         &form
             .image
             .content_type
+            .clone()
             .ok_or(Error::BadRequest)?
             .to_string(),
+        mutex.as_ref(),
     )
     .await?;
 
@@ -133,19 +139,25 @@ async fn upload_interactive(
 
 /// Get a picture of the currently logged in user
 #[utoipa::path(tag = "interactive", params(GetQuery))]
-#[get("/")]
+#[get("")]
 async fn me(
     s3: web::Data<Client>,
     id: web::ReqData<String>,
     query: web::Query<GetQuery>,
+    mutex: web::Data<futures_util::lock::Mutex<i32>>,
 ) -> HttpResponse {
     let response = s3
-        .get_image(&id.to_string(), query.quality.unwrap_or(false))
+        .get_image(
+            &id.to_string(),
+            query.quality.unwrap_or(false),
+            mutex.as_ref(),
+        )
         .await;
 
     if let Ok((bytes, mime_type)) = response {
         HttpResponse::Ok().content_type(mime_type).body(bytes)
     } else {
+        log::error!("{:?}", response);
         HttpResponse::InternalServerError().finish()
     }
 }
@@ -159,14 +171,19 @@ async fn get(
     query: web::Query<GetQuery>,
     cache: web::Data<Mutex<HashMap<String, DateTime<Utc>>>>,
     auth: BearerAuth,
+    mutex: web::Data<futures_util::lock::Mutex<i32>>,
 ) -> Result<HttpResponse, Error> {
     if !check_token(auth.token(), "get", &cache).await? {
         return Err(Error::Unauthorized);
     }
 
     Ok(HttpResponse::Ok().body(
-        s3.get_presigned_image(&kthid.to_string(), query.quality.unwrap_or(false))
-            .await?,
+        s3.get_presigned_image(
+            &kthid.to_string(),
+            query.quality.unwrap_or(false),
+            mutex.as_ref(),
+        )
+        .await?,
     ))
 }
 
@@ -179,6 +196,7 @@ async fn get_batch(
     query: web::Query<GetQuery>,
     cache: web::Data<Mutex<HashMap<String, DateTime<Utc>>>>,
     auth: BearerAuth,
+    mutex: web::Data<futures_util::lock::Mutex<i32>>,
 ) -> Result<HttpResponse, Error> {
     if !check_token(auth.token(), "get", &cache).await? {
         return Err(Error::Unauthorized);
@@ -192,9 +210,10 @@ async fn get_batch(
         .into_iter()
         .map(|kthid| {
             let client = s3.clone();
+            let mutex = mutex.clone();
             spawn(async move {
                 client
-                    .get_presigned_image(&kthid, quality)
+                    .get_presigned_image(&kthid, quality, mutex.as_ref())
                     .await
                     .map(|link| (kthid, link))
             })
@@ -219,6 +238,7 @@ async fn upload(
     cache: web::Data<Mutex<HashMap<String, DateTime<Utc>>>>,
     auth: BearerAuth,
     MultipartForm(form): MultipartForm<UploadForm>,
+    mutex: web::Data<futures_util::lock::Mutex<i32>>,
 ) -> Result<HttpResponse, Error> {
     if !check_token(auth.token(), "upload", &cache).await? {
         return Err(Error::Unauthorized);
@@ -227,12 +247,14 @@ async fn upload(
     s3.put_image(
         PathType::Personal(kthid.to_string()),
         kthid.as_ref(),
-        get_bytes(&form.image)?,
+        &form.image,
         &form
             .image
             .content_type
+            .clone()
             .ok_or(Error::BadRequest)?
             .to_string(),
+        mutex.as_ref(),
     )
     .await?;
 
@@ -248,6 +270,7 @@ async fn nollan(
     cache: web::Data<Mutex<HashMap<String, DateTime<Utc>>>>,
     auth: BearerAuth,
     MultipartForm(form): MultipartForm<UploadForm>,
+    mutex: web::Data<futures_util::lock::Mutex<i32>>,
 ) -> Result<HttpResponse, Error> {
     if !check_token(auth.token(), "nollan", &cache).await? {
         return Err(Error::Unauthorized);
@@ -256,12 +279,14 @@ async fn nollan(
     s3.put_image(
         PathType::Original(kthid.to_string()),
         kthid.as_ref(),
-        get_bytes(&form.image)?,
+        &form.image,
         &form
             .image
             .content_type
+            .clone()
             .ok_or(Error::BadRequest)?
             .to_string(),
+        mutex.as_ref(),
     )
     .await?;
 

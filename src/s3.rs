@@ -1,12 +1,15 @@
 use std::{
     env,
     fmt::Display,
-    io::{Cursor, Read},
+    fs::File,
+    io::{Cursor, Read, Seek, SeekFrom},
     time::Duration,
 };
 
+use futures_util::lock::Mutex;
+
 use actix_multipart::form::tempfile::TempFile;
-use actix_web::web::Bytes;
+use actix_web::{Either, web::Bytes};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::{
     error::SdkError,
@@ -20,7 +23,6 @@ use aws_sdk_s3::{
 use aws_smithy_runtime_api::http::Response;
 use image::{ImageFormat, ImageReader, imageops::FilterType};
 use moka::sync::Cache;
-use reqwest::header::CONTENT_TYPE;
 use webp::{Encoder, WebPMemory};
 
 use crate::error::Error;
@@ -131,7 +133,12 @@ impl Client {
     /// Priority: compressed > personal > original > missing
     ///
     /// if high quality was requested ignore compressed
-    pub async fn get_image(&self, kthid: &str, quality: bool) -> Result<(Bytes, String), Error> {
+    pub async fn get_image(
+        &self,
+        kthid: &str,
+        quality: bool,
+        mutex: &Mutex<i32>,
+    ) -> Result<(Bytes, String), Error> {
         let mut key;
 
         // If profile picture requested try to get compressed
@@ -145,13 +152,13 @@ impl Client {
 
         key = PathType::Personal(kthid.to_string());
 
-        if let Some(url) = self.get_quality_image(kthid, key, quality).await? {
+        if let Some(url) = self.get_quality_image(kthid, key, quality, mutex).await? {
             return Ok(url);
         }
 
         key = PathType::Original(kthid.to_string());
 
-        if let Some(url) = self.get_quality_image(kthid, key, quality).await? {
+        if let Some(url) = self.get_quality_image(kthid, key, quality, mutex).await? {
             return Ok(url);
         }
 
@@ -168,21 +175,22 @@ impl Client {
         kthid: &str,
         key: PathType,
         quality: bool,
+        mutex: &Mutex<i32>,
     ) -> Result<Option<(Bytes, String)>, Error> {
         if let Ok(image) = self.get_object(&key.to_string()).await {
             let (image_bytes, mime_type) = Client::parse_get_object(image).await?;
 
             // If profile sized picture was requested but not found, create it
             if !quality {
-                let compressed = process_image(image_bytes.to_vec(), &mime_type)?;
+                let webp = process_image(Either::Right(image_bytes.to_vec()), mutex).await?;
                 self.put_object(
                     PathType::Compressed(kthid.to_string()),
-                    compressed.clone(),
+                    Either::Left(webp),
                     "image/webp",
                 )
                 .await?;
 
-                return Ok(Some((Bytes::from(compressed), mime_type)));
+                return Ok(Some((Bytes::from(image_bytes), mime_type)));
             } else {
                 return Ok(Some((image_bytes, mime_type)));
             }
@@ -221,7 +229,12 @@ impl Client {
     /// Priority: compressed > personal > original > missing
     ///
     /// if high quality was requested ignore compressed
-    pub async fn get_presigned_image(&self, kthid: &str, quality: bool) -> Result<String, Error> {
+    pub async fn get_presigned_image(
+        &self,
+        kthid: &str,
+        quality: bool,
+        mutex: &Mutex<i32>,
+    ) -> Result<String, Error> {
         if !quality && let Some(presigned) = self.compressed_cache.get(kthid) {
             return Ok(presigned);
         } else if quality && let Some(presigned) = self.quality_cache.get(kthid) {
@@ -245,7 +258,7 @@ impl Client {
 
         key = PathType::Personal(kthid.to_string());
 
-        let result = self.get_quality_presigned(kthid, key, quality).await;
+        let result = self.get_quality_presigned(kthid, key, quality, mutex).await;
 
         if let Ok(Some(url)) = result {
             self.quality_cache.insert(kthid.to_string(), url.clone());
@@ -254,7 +267,7 @@ impl Client {
 
         key = PathType::Original(kthid.to_string());
 
-        let result = self.get_quality_presigned(kthid, key, quality).await;
+        let result = self.get_quality_presigned(kthid, key, quality, mutex).await;
 
         if let Ok(Some(url)) = result {
             self.quality_cache.insert(kthid.to_string(), url.clone());
@@ -283,24 +296,17 @@ impl Client {
         key: &str,
         path: PathType,
         quality: bool,
+        mutex: &Mutex<i32>,
     ) -> Result<Option<String>, Error> {
         if let Some(presigned) = self.get_presigned(&path.to_string()).await? {
             // If profile sized picture was requested but not found, create it
             if !quality {
                 let res = reqwest::get(presigned).await?;
-                let mime_type = res
-                    .headers()
-                    .get(CONTENT_TYPE)
-                    .ok_or(Error::InternalServerError(String::from(
-                        "no mime_type in s3",
-                    )))?
-                    .to_str()?
-                    .to_string();
                 let image_bytes = res.bytes().await?;
-                let compressed = process_image(image_bytes.to_vec(), &mime_type)?;
+                let webp = process_image(Either::Right(image_bytes.to_vec()), mutex).await?;
                 self.put_object(
                     PathType::Compressed(key.to_string()),
-                    compressed.clone(),
+                    Either::Left(webp),
                     "image/webp",
                 )
                 .await?;
@@ -352,25 +358,34 @@ impl Client {
         &self,
         path: PathType,
         kthid: &str,
-        image_bytes: Vec<u8>,
+        image: &TempFile,
         mime_type: &str,
+        mutex: &Mutex<i32>,
     ) -> Result<(), Error> {
         // Validate mime type before uploading
         ImageFormat::from_mime_type(mime_type).ok_or(Error::InternalServerError(format!(
             "incorrect mime type: {mime_type}"
         )))?;
 
-        self.put_object(path, image_bytes.clone(), &mime_type)
+        log::debug!("Uploading full size");
+
+        self.put_object(path, Either::Right(image), &mime_type)
             .await?;
 
-        let image_bytes = process_image(image_bytes, mime_type)?;
+        log::debug!("Process image");
+
+        let webp = process_image(Either::Left(image), mutex).await?;
+
+        log::debug!("Upload compressed");
 
         self.put_object(
             PathType::Compressed(kthid.to_string()),
-            image_bytes,
+            Either::Left(webp),
             "image/webp",
         )
         .await?;
+
+        log::debug!("Invalidate cache");
 
         self.compressed_cache.invalidate(kthid);
         self.quality_cache.invalidate(kthid);
@@ -382,14 +397,19 @@ impl Client {
     async fn put_object(
         &self,
         path: PathType,
-        image_bytes: Vec<u8>,
+        image: Either<webp::WebPMemory, &TempFile>,
         content_type: &str,
     ) -> Result<PutObjectOutput, SdkError<PutObjectError, Response>> {
+        let bytes = match image {
+            Either::Left(image) => image.to_vec(),
+            Either::Right(image) => get_bytes(image).unwrap(),
+        };
+
         self.s3_client
             .put_object()
             .bucket(env::var("S3_BUCKET").expect("bucket name env"))
             .key(path.to_string())
-            .body(ByteStream::from(image_bytes))
+            .body(ByteStream::from(bytes))
             .content_type(content_type)
             .send()
             .await
@@ -398,32 +418,41 @@ impl Client {
 
 /// Extract the image bytes from a temp file
 pub fn get_bytes(image: &TempFile) -> Result<Vec<u8>, std::io::Error> {
-    image
-        .file
-        .as_file()
-        .bytes()
-        .map(|x| x)
-        .collect::<Result<Vec<u8>, std::io::Error>>()
+    let mut file = File::open(image.file.path())?;
+
+    file.seek(SeekFrom::Start(0))?;
+
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+
+    Ok(buffer)
 }
 
 /// Convert any image to a 480x480 webp encoded image
-fn process_image(image_bytes: Vec<u8>, mime_type: &str) -> Result<Vec<u8>, Error> {
-    let img_format = ImageFormat::from_mime_type(mime_type).ok_or(Error::InternalServerError(
-        format!("incorrect mime type: {mime_type}"),
-    ))?;
+async fn process_image(
+    image: Either<&TempFile, Vec<u8>>,
+    mutex: &Mutex<i32>,
+) -> Result<WebPMemory, Error> {
+    mutex.lock();
+    log::debug!("Decode image");
 
-    let image = ImageReader::with_format(Cursor::new(image_bytes), img_format).decode()?;
+    let image = match image {
+        Either::Left(image) => ImageReader::open(&image.file)?
+            .with_guessed_format()?
+            .decode()?,
+        Either::Right(image) => ImageReader::new(Cursor::new(image))
+            .with_guessed_format()?
+            .decode()?,
+    };
+
+    log::debug!("Resize image");
 
     let image = image.resize(480, 480, FilterType::Lanczos3);
 
-    // Make webp::Encoder from DynamicImage.
-    let encoder: Encoder = Encoder::from_image(&image)?;
+    log::debug!("Encode image");
 
-    // Encode image into WebPMemory.
-    let encoded_webp: WebPMemory = encoder.encode(65f32);
+    let encoder = Encoder::from_image(&image).unwrap();
+    let webp = encoder.encode(65f32);
 
-    Ok(encoded_webp
-        .bytes()
-        .map(|x| x)
-        .collect::<Result<Vec<u8>, std::io::Error>>()?)
+    Ok(webp)
 }
