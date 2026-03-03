@@ -108,7 +108,7 @@ struct UploadForm {
 
 #[get("/")]
 async fn index() -> actix_web::Result<NamedFile> {
-    Ok(NamedFile::open("index.html")?)
+    Ok(NamedFile::open("index.html")?.use_last_modified(false))
 }
 
 /// Upload a picture using the interactive website
